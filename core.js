@@ -530,7 +530,7 @@ setInterval(() => {
             try { data.sock.ws.close(); } catch (e) {}
             activeBots.delete(id);
         }
-    } else if (timeString === '06:00') {
+    } else if (timeString === '05:00') {
         console.log('⏰ Menjalankan ulang sesi bot (Jadwal Harian ON)...');
         const dirs = fs.readdirSync(__dirname).filter(f => f.startsWith('auth_info_bot'));
         dirs.forEach(dir => startWorkerBot(dir.replace('auth_info_bot', '')));
