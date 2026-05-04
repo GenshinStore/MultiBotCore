@@ -11,17 +11,6 @@ const sharp = require('sharp');
 
 require('events').EventEmitter.defaultMaxListeners = 0;
 
-// ================= SILENCER (MEMBUNGKAM LOG INTERNAL BAILEYS) =================
-const originalConsoleLog = console.log;
-console.log = function() {
-    const firstArg = arguments[0];
-    // Cegah log sampah dari sistem Signal Baileys muncul di RDP
-    if (typeof firstArg === 'string' && (firstArg.includes('Closing session: SessionEntry') || firstArg.includes('Closing open session'))) {
-        return; 
-    }
-    originalConsoleLog.apply(console, arguments);
-};
-
 // ================= CONFIGURATION =================
 const ADMIN_GROUP_ID = '120363409663500630@g.us'; 
 const PRIMARY_GROUP_ID = '120363408426078537@g.us';
@@ -66,56 +55,71 @@ async function downloadMedia(mediaMsg, type) {
 
 async function detectQR(buffer) {
     try {
+        console.log(`\n[DEBUG-QR] Memulai scan media...`);
+        
+        // 1. WAJIB: Background putih untuk transparansi WebP/PNG
         const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
         const meta = await baseImg.metadata();
-        const w = meta.width;
-        const h = meta.height;
+        let w = meta.width;
+        let h = meta.height;
 
         if (!w || !h) return null;
 
+        // 2. TAMBAH PADDING (QUIET ZONE): 
+        // QR Code WAJIB punya ruang putih di sekelilingnya. Stiker sering dipotong terlalu mepet.
         const paddedImg = baseImg.extend({
             top: 60, bottom: 60, left: 60, right: 60,
             background: '#ffffff'
         });
 
-        const newW = w + 120;
-        const newH = h + 120;
+        // Update dimensi setelah ditambah bingkai putih
+        w += 120;
+        h += 120;
 
-        const scale = Math.max(1, 1000 / Math.max(newW, newH));
-        const finalW = Math.floor(newW * scale);
-        const finalH = Math.floor(newH * scale);
+        // 3. AUTO-UPSCALE DENGAN NEAREST NEIGHBOR
+        // Jika stiker kecil, zoom-in. 'kernel.nearest' memastikan gambar tetap tajam (kotak-kotak), TIDAK BLUR!
+        const scale = Math.max(1, 1000 / Math.max(w, h));
+        const newW = Math.floor(w * scale);
+        const newH = Math.floor(h * scale);
         
-        const upscaledImg = paddedImg.resize(finalW, finalH, { 
+        const upscaledImg = paddedImg.resize(newW, newH, { 
             kernel: sharp.kernel.nearest 
         });
 
+        // 4. POTONG AREA FOKUS
         let crops = [
-            { img: upscaledImg.clone() }
+            { name: 'Full Layar', img: upscaledImg.clone() }
         ];
         
-        const minDim = Math.min(finalW, finalH);
+        const minDim = Math.min(newW, newH);
         const size = Math.floor(minDim * 0.85);
         
+        // Potong Khusus Tengah (Untuk Screenshot DANA Ori)
         crops.push({
-            img: upscaledImg.clone().extract({ left: Math.floor((finalW - size)/2), top: Math.floor((finalH - size)/2), width: size, height: size })
+            name: 'Fokus Tengah',
+            img: upscaledImg.clone().extract({ left: Math.floor((newW - size)/2), top: Math.floor((newH - size)/2), width: size, height: size })
         });
         
+        // Potong Khusus Atas (Untuk Stiker "Cepat!!!")
         crops.push({
-            img: upscaledImg.clone().extract({ left: 0, top: 0, width: finalW, height: Math.floor(finalH * 0.7) })
+            name: 'Fokus Atas',
+            img: upscaledImg.clone().extract({ left: 0, top: 0, width: newW, height: Math.floor(newH * 0.7) })
         });
 
+        // 5. PROSES SCAN
         for (let i = 0; i < crops.length; i++) {
             const imgObj = crops[i].img.resize(800, 800, { fit: 'inside', withoutEnlargement: true });
             
             const filters = [
-                imgObj.clone(),
-                imgObj.clone().normalize().greyscale(),
-                imgObj.clone().greyscale().threshold(140)
+                { name: 'Normal', img: imgObj.clone() },
+                { name: 'Hitam Putih', img: imgObj.clone().normalize().greyscale() },
+                { name: 'Threshold', img: imgObj.clone().greyscale().threshold(140) }
             ];
 
             for (let j = 0; j < filters.length; j++) {
                 try {
-                    const { data, info } = await filters[j]
+                    // Pastikan 4 Channel RGBA agar jsQR tidak error
+                    const { data, info } = await filters[j].img
                         .ensureAlpha()
                         .raw()
                         .toBuffer({ resolveWithObject: true });
@@ -124,16 +128,20 @@ async function detectQR(buffer) {
                     const decoded = jsQR(clampedArray, info.width, info.height);
                     
                     if (decoded && decoded.data) {
-                        return decoded.data; // Langsung return hasil tanpa console.log
+                        console.log(`[DEBUG-QR] ✅ QR Terbaca! (Metode: ${crops[i].name} - ${filters[j].name}) ->`, decoded.data);
+                        return decoded.data;
                     }
                 } catch (err) {
                     continue; 
                 }
             }
         }
+        
+        console.log(`[DEBUG-QR] ❌ GAGAL. QR tidak ditemukan di media ini.`);
         return null;
     } catch (e) {
-        return null; // Error diam-diam tanpa console.log
+        console.log(`[DEBUG-QR] ❌ Error sistem saat scan:`, e.message);
+        return null;
     }
 }
 
@@ -166,7 +174,6 @@ function processExtractedLink(sock, textRaw, label) {
             
             if (isDuplicate(finalUrl)) return; 
 
-            // LOG INI SAJA YANG TAMPIL DI RDP
             console.log(`\n🚀 [BERHASIL!] Menemukan dan meneruskan: ${finalUrl} (Dari ${label})`);
             const msg = `${finalUrl}\n\nTipe: ${label}`;
             
