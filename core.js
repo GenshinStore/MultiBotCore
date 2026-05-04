@@ -247,61 +247,74 @@ Ketika ada user scan QR bot baru, akan muncul pesan konfirmasi di grup ini:
                 return adminSock.sendMessage(from, { text: `⚠️ Bot ID ${botId} sudah ada/aktif. Gunakan ID lain atau ketik !list.` });
             }
 
-            const loadingMsg = await adminSock.sendMessage(from, { text: `⏳ Generate QR untuk Bot ${botId}...\n(Mengambil koneksi ke server WA...)` });
+            await adminSock.sendMessage(from, { text: `⏳ Generate QR untuk Bot ${botId}...\n(Mengambil koneksi ke server WA...)` });
             
-            // AMBIL VERSI WHATSAPP TERBARU (Sangat Penting agar QR Muncul!)
-            const { version } = await fetchLatestBaileysVersion(); 
-            const { state: tempState, saveCreds: tempSaveCreds } = await useMultiFileAuthState(folderName);
-            
-            // Generate temporary socket untuk ambil QR
-            const tempSock = makeWASocket({ 
-                version, // <--- Ini yang sebelumnya terlewat
-                auth: tempState, 
-                logger: pino({ level: 'silent' }), 
-                browser: [`Setup-${botId}`, 'Chrome', '1.0.0'],
-                connectTimeoutMs: 60000,
-                getMessage: async () => ({ conversation: '' }) // Mencegah error silent
-            });
-            
-            tempSock.ev.on('creds.update', tempSaveCreds);
+            // Bungkus dalam fungsi agar bisa AUTO-RECONNECT saat Error 515
+            async function connectSetup() {
+                const { version } = await fetchLatestBaileysVersion(); 
+                const { state: tempState, saveCreds: tempSaveCreds } = await useMultiFileAuthState(folderName);
+                
+                const tempSock = makeWASocket({ 
+                    version,
+                    auth: tempState, 
+                    logger: pino({ level: 'silent' }), 
+                    browser: [`Setup-${botId}`, 'Chrome', '1.0.0'],
+                    connectTimeoutMs: 60000,
+                    getMessage: async () => ({ conversation: '' }) 
+                });
+                
+                tempSock.ev.on('creds.update', tempSaveCreds);
 
-            pendingSetups.set(sender, { sock: tempSock, botId });
+                pendingSetups.set(sender, { sock: tempSock, botId });
 
-            tempSock.ev.on('connection.update', async (update) => {
-                const { connection, qr, lastDisconnect } = update;
-                
-                if (qr) {
-                    try {
-                        const qrBuffer = await qrcode.toBuffer(qr, { scale: 6 });
-                        await adminSock.sendMessage(from, { 
-                            image: qrBuffer, 
-                            caption: `✅ *QR Login untuk Bot ${botId}*\n\nSilakan scan QR ini. (QR otomatis berganti jika expired).\nKetik *!batal* jika ingin menggagalkan.` 
-                        });
-                    } catch (err) {
-                        console.log('Gagal render QR Image:', err);
-                        await adminSock.sendMessage(from, { text: `❌ Gagal memproses gambar QR. Silakan cek log PM2.` });
-                    }
-                }
-                
-                if (connection === 'close') {
-                    const statusCode = lastDisconnect?.error?.output?.statusCode;
-                    if (statusCode !== DisconnectReason.loggedOut) {
-                        console.log(`[Setup-${botId}] Koneksi QR terputus. Error code:`, statusCode);
-                    }
-                }
-                
-                if (connection === 'open') {
-                    // Berhasil scan, minta persetujuan admin
-                    try { tempSock.ws.close(); } catch (e) {} // Tutup dengan aman
-                    pendingSetups.delete(sender);
+                tempSock.ev.on('connection.update', async (update) => {
+                    const { connection, qr, lastDisconnect } = update;
                     
-                    const askMsg = await adminSock.sendMessage(from, { 
-                        text: `🔔 *PERMOHONAN BOT BARU*\n\nUser: @${sender.split('@')[0]}\nBot ID: *${botId}*\nStatus: QR Berhasil di-scan.\n\n👉 *Admin*: Balas (Quote/Reply) pesan ini dengan *OKE* untuk menyalakan atau *TIDAK* untuk menolak.`,
-                        mentions: [sender]
-                    });
-                    pendingApprovals.set(askMsg.key.id, botId);
-                }
-            });
+                    if (qr) {
+                        try {
+                            const qrBuffer = await qrcode.toBuffer(qr, { scale: 6 });
+                            await adminSock.sendMessage(from, { 
+                                image: qrBuffer, 
+                                caption: `✅ *QR Login untuk Bot ${botId}*\n\nSilakan scan QR ini. (QR otomatis berganti jika expired).\nKetik *!batal* jika ingin menggagalkan.` 
+                            });
+                        } catch (err) {}
+                    }
+                    
+                    if (connection === 'close') {
+                        const statusCode = lastDisconnect?.error?.output?.statusCode;
+                        console.log(`[Setup-${botId}] Koneksi QR terputus. Error code:`, statusCode);
+                        
+                        if (statusCode !== DisconnectReason.loggedOut) {
+                            // JIKA ERROR 515 / 405, RECONNECT OTOMATIS
+                            console.log(`[Setup-${botId}] Mencoba menyambung kembali (Auto-Reconnect)...`);
+                            setTimeout(connectSetup, 2000); 
+                        } else {
+                            // Jika dilogout / ditolak dari HP
+                            pendingSetups.delete(sender);
+                            if (fs.existsSync(folderName)) fs.rmSync(folderName, { recursive: true, force: true });
+                            await adminSock.sendMessage(from, { text: `❌ Setup Bot ${botId} dibatalkan atau ditolak perangkat.` });
+                        }
+                    }
+                    
+                    if (connection === 'open') {
+                        console.log(`[Setup-${botId}] Sesi berhasil tersimpan!`);
+                        
+                        // Tutup koneksi setup dengan aman karena sudah berhasil
+                        try { tempSock.ws.close(); } catch (e) {} 
+                        pendingSetups.delete(sender);
+                        
+                        // Kirim pesan minta persetujuan admin
+                        const askMsg = await adminSock.sendMessage(from, { 
+                            text: `🔔 *PERMOHONAN BOT BARU*\n\nUser: @${sender.split('@')[0]}\nBot ID: *${botId}*\nStatus: ✅ *QR Berhasil di-scan & login!*\n\n👉 *Admin*: Balas (Quote/Reply) pesan ini dengan *OKE* untuk menyalakan atau *TIDAK* untuk menolak.`,
+                            mentions: [sender]
+                        });
+                        pendingApprovals.set(askMsg.key.id, botId);
+                    }
+                });
+            }
+
+            // Jalankan fungsi setup
+            connectSetup();
             return;
         }
 
