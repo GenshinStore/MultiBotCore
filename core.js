@@ -242,30 +242,55 @@ Ketika ada user scan QR bot baru, akan muncul pesan konfirmasi di grup ini:
             const botId = text.split(' ')[1];
             if (!botId) return adminSock.sendMessage(from, { text: 'Format: !reqbot <id>' });
             if (activeBots.has(botId) || fs.existsSync(`auth_info_bot${botId}`)) {
-                return adminSock.sendMessage(from, { text: '⚠️ Bot ID sudah ada/aktif.' });
+                return adminSock.sendMessage(from, { text: '⚠️ Bot ID sudah ada/aktif. Ketik !list untuk mengecek.' });
             }
 
-            const loadingMsg = await adminSock.sendMessage(from, { text: `⏳ Generate QR untuk Bot ${botId}...` });
+            const loadingMsg = await adminSock.sendMessage(from, { text: `⏳ Generate QR untuk Bot ${botId}...\n(Harap tunggu beberapa detik)` });
             
             // Generate temporary socket untuk ambil QR
-            const { state: tempState } = await useMultiFileAuthState(`auth_info_bot${botId}`);
-            const tempSock = makeWASocket({ auth: tempState, logger: pino({ level: 'silent' }), browser: [`Setup-${botId}`, 'Chrome', '1.0.0'] });
+            const { state: tempState, saveCreds: tempSaveCreds } = await useMultiFileAuthState(`auth_info_bot${botId}`);
+            const tempSock = makeWASocket({ 
+                auth: tempState, 
+                logger: pino({ level: 'error' }), // Ubah ke error agar jika ada gagal koneksi terlihat di PM2
+                browser: [`Setup-${botId}`, 'Chrome', '1.0.0'],
+                connectTimeoutMs: 60000
+            });
             
+            // PENTING: Wajib ada agar sesi bisa tersimpan setelah discan
+            tempSock.ev.on('creds.update', tempSaveCreds);
+
             pendingSetups.set(sender, { sock: tempSock, botId });
 
             tempSock.ev.on('connection.update', async (update) => {
-                const { connection, qr } = update;
+                const { connection, qr, lastDisconnect } = update;
+                
                 if (qr) {
-                    const qrBuffer = await qrcode.toBuffer(qr, { scale: 6 });
-                    await adminSock.sendMessage(from, { image: qrBuffer, caption: `QR Login untuk Bot *${botId}*\nKetik *!batal* untuk menggagalkan.` });
+                    try {
+                        const qrBuffer = await qrcode.toBuffer(qr, { scale: 6 });
+                        await adminSock.sendMessage(from, { 
+                            image: qrBuffer, 
+                            caption: `✅ *QR Login untuk Bot ${botId}*\n\nSilakan scan QR ini. Jika ingin membatalkan, ketik *!batal*` 
+                        });
+                    } catch (err) {
+                        console.log('Gagal render QR Image:', err);
+                        await adminSock.sendMessage(from, { text: `❌ Gagal menampilkan gambar QR. Silakan cek log PM2.` });
+                    }
                 }
+                
+                if (connection === 'close') {
+                    const statusCode = lastDisconnect?.error?.output?.statusCode;
+                    if (statusCode !== DisconnectReason.loggedOut) {
+                        console.log(`[Setup-${botId}] Koneksi terputus saat request QR. Error code:`, statusCode);
+                    }
+                }
+                
                 if (connection === 'open') {
                     // Berhasil scan, minta persetujuan admin
-                    tempSock.ws.close(); // Tutup koneksi sementara
+                    try { tempSock.ws.close(); } catch (e) {} // Tutup koneksi sementara dengan aman
                     pendingSetups.delete(sender);
                     
                     const askMsg = await adminSock.sendMessage(from, { 
-                        text: `🔔 *PERMOHONAN BOT BARU*\n\nUser: @${sender.split('@')[0]}\nBot ID: *${botId}*\nStatus: QR Berhasil di-scan.\n\n👉 *Admin*: Balas pesan ini dengan *OKE* untuk menyalakan atau *TIDAK* untuk menolak.`,
+                        text: `🔔 *PERMOHONAN BOT BARU*\n\nUser: @${sender.split('@')[0]}\nBot ID: *${botId}*\nStatus: QR Berhasil di-scan.\n\n👉 *Admin*: Balas (Reply) pesan ini dengan *OKE* untuk menyalakan atau *TIDAK* untuk menolak.`,
                         mentions: [sender]
                     });
                     pendingApprovals.set(askMsg.key.id, botId);
