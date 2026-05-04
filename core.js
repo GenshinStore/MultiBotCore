@@ -5,9 +5,11 @@ const qrcodeTerminal = require('qrcode-terminal');
 const fs = require('fs');
 const crypto = require('crypto');
 const https = require('https');
-const Jimp = require('jimp');
-const QrCode = require('qrcode-reader');
+// const Jimp = require('jimp');
+// const QrCode = require('qrcode-reader');
 const sharp = require('sharp');
+// const sharp = require('sharp');
+const jsQR = require('jsqr');
 
 require('events').EventEmitter.defaultMaxListeners = 0;
 
@@ -55,68 +57,54 @@ async function downloadMedia(mediaMsg, type) {
 
 async function detectQR(buffer) {
     try {
-        const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
+        console.log(`\n[DEBUG-QR] Memulai scan media...`);
+        const baseImg = sharp(buffer);
         const meta = await baseImg.metadata();
         const w = meta.width;
         const h = meta.height;
 
         if (!w || !h) return null;
 
-        console.log(`\n[DEBUG-QR] Memproses Media: Resolusi ${w}x${h}`);
-
-        const decodeBuffer = async (imgBuf, method) => {
-            const image = await Jimp.read(imgBuf);
-            return new Promise((resolve, reject) => {
-                const qr = new QrCode();
-                qr.callback = (e, v) => (e || !v) ? reject(e) : resolve({ result: v.result, method });
-                qr.decode(image.bitmap);
-            });
-        };
-
-        // KUNCI PERBAIKAN: Potong gambar menjadi area spesifik untuk menyingkirkan noise
-        let crops = [
-            { name: '1. Full Gambar Normal', img: baseImg.clone() },
-            { name: '2. Full Gambar Kontras Tinggi', img: baseImg.clone().normalize().greyscale() }
-        ];
-
-        // 3. Potong Bagian Kiri (Target: Screenshot DANA - QR selalu di kiri layar)
-        crops.push({ 
-            name: '3. Potong Area Kiri (Spesialis Screenshot)', 
-            img: baseImg.clone().extract({ left: 0, top: 0, width: Math.floor(w * 0.75), height: h }) 
-        });
-
-        // 4. Potong Bagian Atas (Target: Stiker DANA - QR biasa di atas teks/kartun)
-        crops.push({ 
-            name: '4. Potong Area Atas (Spesialis Stiker)', 
-            img: baseImg.clone().extract({ left: 0, top: 0, width: w, height: Math.floor(h * 0.75) }) 
-        });
-
-        // 5. Potong Kotak Tengah
-        const minDim = Math.min(w, h);
-        const size = Math.floor(minDim * 0.85);
-        crops.push({ 
-            name: '5. Potong Presisi Tengah', 
-            img: baseImg.clone().extract({ left: Math.floor((w - size) / 2), top: Math.floor((h - size) / 2), width: size, height: size }) 
-        });
-
-        // Resize ke 800px agar library tidak pusing membaca jutaan pixel
-        const bufferPromises = crops.map(async (c) => {
-            const buf = await c.img
-                .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
-                .png()
-                .toBuffer();
-            return { name: c.name, buf };
-        });
-
-        const preparedBuffers = await Promise.all(bufferPromises);
-
-        console.log(`[DEBUG-QR] Menembakkan 5 metode "Sniper" secara bersamaan...`);
-        const resultObj = await Promise.any(preparedBuffers.map(pb => decodeBuffer(pb.buf, pb.name)));
+        // KUNCI: Potong gambar menjadi beberapa area agar fokus ke QR
+        let crops = [ baseImg.clone() ]; // 1. Scan Full Layar
         
-        console.log(`[DEBUG-QR] ✅ BERHASIL! Ditemukan oleh [${resultObj.method}] -> Teks mentah: ${resultObj.result}`);
-        return resultObj.result;
+        if (w >= 300 && h >= 300) {
+            const size = Math.floor(Math.min(w, h) * 0.9);
+            // 2. Scan Khusus Tengah (Bagus untuk Screenshot DANA)
+            crops.push(baseImg.clone().extract({ left: Math.floor((w - size)/2), top: Math.floor((h - size)/2), width: size, height: size })); 
+            // 3. Scan Khusus Atas (Bagus untuk Stiker)
+            crops.push(baseImg.clone().extract({ left: 0, top: 0, width: w, height: Math.floor(h * 0.7) })); 
+        }
+
+        for (let i = 0; i < crops.length; i++) {
+            // Resize gambar max 800px dan paksa format warna menjadi RGBA (Syarat mutlak jsQR)
+            const imgObj = crops[i].resize(800, 800, { fit: 'inside', withoutEnlargement: true }).ensureAlpha();
+            
+            // Variasi Kontras Warna untuk menebus gambar buram
+            const filters = [
+                imgObj.clone(), // Normal
+                imgObj.clone().normalize().greyscale(), // Hitam Putih Tajam
+                imgObj.clone().greyscale().linear(1.5, -50) // Gelap Terang
+            ];
+
+            for (let j = 0; j < filters.length; j++) {
+                // Ekstrak pixel mentah (Jauh lebih cepat dari Jimp)
+                const { data, info } = await filters[j].raw().toBuffer({ resolveWithObject: true });
+                const clampedArray = new Uint8ClampedArray(data);
+                
+                // Tembak menggunakan jsQR
+                const decoded = jsQR(clampedArray, info.width, info.height);
+                
+                if (decoded && decoded.data) {
+                    console.log(`[DEBUG-QR] ✅ QR Terbaca! ->`, decoded.data);
+                    return decoded.data;
+                }
+            }
+        }
+        console.log(`[DEBUG-QR] ❌ GAGAL. QR tidak ditemukan di media ini.`);
+        return null;
     } catch (e) {
-        console.log(`[DEBUG-QR] ❌ GAGAL. Semua 5 metode tidak mendeteksi QR. (Logo DANA mungkin terlalu besar / gambar sangat pecah)`);
+        console.log(`[DEBUG-QR] ❌ Error saat scan:`, e.message);
         return null;
     }
 }
