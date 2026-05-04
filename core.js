@@ -64,76 +64,170 @@ async function downloadMedia(mediaMsg, type) {
     } catch (error) { throw error; }
 }
 
+// async function detectQR(buffer) {
+//     try {
+//         const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
+//         const meta = await baseImg.metadata();
+//         const w = meta.width;
+//         const h = meta.height;
+
+//         if (!w || !h) return null;
+
+//         const paddedImg = baseImg.extend({
+//             top: 60, bottom: 60, left: 60, right: 60,
+//             background: '#ffffff'
+//         });
+
+//         const newW = w + 120;
+//         const newH = h + 120;
+
+//         const scale = Math.max(1, 1000 / Math.max(newW, newH));
+//         const finalW = Math.floor(newW * scale);
+//         const finalH = Math.floor(newH * scale);
+        
+//         const upscaledImg = paddedImg.resize(finalW, finalH, { 
+//             kernel: sharp.kernel.nearest 
+//         });
+
+//         let crops = [
+//             { img: upscaledImg.clone() }
+//         ];
+        
+//         const minDim = Math.min(finalW, finalH);
+//         const size = Math.floor(minDim * 0.85);
+        
+//         crops.push({
+//             img: upscaledImg.clone().extract({ left: Math.floor((finalW - size)/2), top: Math.floor((finalH - size)/2), width: size, height: size })
+//         });
+        
+//         crops.push({
+//             img: upscaledImg.clone().extract({ left: 0, top: 0, width: finalW, height: Math.floor(finalH * 0.7) })
+//         });
+
+//         for (let i = 0; i < crops.length; i++) {
+//             const imgObj = crops[i].img.resize(800, 800, { fit: 'inside', withoutEnlargement: true });
+            
+//             const filters = [
+//                 imgObj.clone(),
+//                 imgObj.clone().normalize().greyscale(),
+//                 imgObj.clone().greyscale().threshold(140)
+//             ];
+
+//             for (let j = 0; j < filters.length; j++) {
+//                 try {
+//                     const { data, info } = await filters[j]
+//                         .ensureAlpha()
+//                         .raw()
+//                         .toBuffer({ resolveWithObject: true });
+                    
+//                     const clampedArray = new Uint8ClampedArray(data);
+//                     const decoded = jsQR(clampedArray, info.width, info.height);
+                    
+//                     if (decoded && decoded.data) {
+//                         return decoded.data; // Langsung return hasil tanpa console.log
+//                     }
+//                 } catch (err) {
+//                     continue; 
+//                 }
+//             }
+//         }
+//         return null;
+//     } catch (e) {
+//         return null; // Error diam-diam tanpa console.log
+//     }
+// }
+
 async function detectQR(buffer) {
     try {
-        const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
-        const meta = await baseImg.metadata();
-        const w = meta.width;
-        const h = meta.height;
+        const base = sharp(buffer).flatten({ background: '#ffffff' });
+        const meta = await base.metadata();
+        if (!meta.width || !meta.height) return null;
 
-        if (!w || !h) return null;
+        let w = meta.width;
+        let h = meta.height;
 
-        const paddedImg = baseImg.extend({
-            top: 60, bottom: 60, left: 60, right: 60,
+        // 🔥 padding besar (quiet zone penting)
+        const padded = base.extend({
+            top: 80, bottom: 80, left: 80, right: 80,
             background: '#ffffff'
         });
 
-        const newW = w + 120;
-        const newH = h + 120;
+        w += 160;
+        h += 160;
 
-        const scale = Math.max(1, 1000 / Math.max(newW, newH));
-        const finalW = Math.floor(newW * scale);
-        const finalH = Math.floor(newH * scale);
-        
-        const upscaledImg = paddedImg.resize(finalW, finalH, { 
-            kernel: sharp.kernel.nearest 
+        // 🔥 upscale agresif (kunci stiker kecil)
+        const scale = Math.max(2, 1400 / Math.max(w, h));
+        const W = Math.floor(w * scale);
+        const H = Math.floor(h * scale);
+
+        const img = padded.resize(W, H, {
+            kernel: sharp.kernel.nearest
         });
 
-        let crops = [
-            { img: upscaledImg.clone() }
+        // 🔥 multi crop (prioritas stiker)
+        const crops = [
+            // atas (stiker biasanya di sini)
+            img.clone().extract({ left: 0, top: 0, width: W, height: Math.floor(H * 0.65) }),
+
+            // tengah
+            img.clone().extract({
+                left: Math.floor(W * 0.1),
+                top: Math.floor(H * 0.1),
+                width: Math.floor(W * 0.8),
+                height: Math.floor(H * 0.8)
+            }),
+
+            // full
+            img.clone()
         ];
-        
-        const minDim = Math.min(finalW, finalH);
-        const size = Math.floor(minDim * 0.85);
-        
-        crops.push({
-            img: upscaledImg.clone().extract({ left: Math.floor((finalW - size)/2), top: Math.floor((finalH - size)/2), width: size, height: size })
-        });
-        
-        crops.push({
-            img: upscaledImg.clone().extract({ left: 0, top: 0, width: finalW, height: Math.floor(finalH * 0.7) })
-        });
 
-        for (let i = 0; i < crops.length; i++) {
-            const imgObj = crops[i].img.resize(800, 800, { fit: 'inside', withoutEnlargement: true });
-            
-            const filters = [
-                imgObj.clone(),
-                imgObj.clone().normalize().greyscale(),
-                imgObj.clone().greyscale().threshold(140)
-            ];
+        // 🔥 multi angle (QR sering miring)
+        const angles = [0, 90, 180, 270];
 
-            for (let j = 0; j < filters.length; j++) {
-                try {
-                    const { data, info } = await filters[j]
-                        .ensureAlpha()
-                        .raw()
-                        .toBuffer({ resolveWithObject: true });
-                    
-                    const clampedArray = new Uint8ClampedArray(data);
-                    const decoded = jsQR(clampedArray, info.width, info.height);
-                    
-                    if (decoded && decoded.data) {
-                        return decoded.data; // Langsung return hasil tanpa console.log
-                    }
-                } catch (err) {
-                    continue; 
+        for (let c = 0; c < crops.length; c++) {
+            for (let a = 0; a < angles.length; a++) {
+
+                const rotated = crops[c].clone().rotate(angles[a]);
+
+                const resized = rotated.resize(900, 900, {
+                    fit: 'inside',
+                    withoutEnlargement: true
+                });
+
+                // 🔥 multi filter (kontras ekstrim)
+                const filters = [
+                    resized.clone(),
+                    resized.clone().greyscale(),
+                    resized.clone().normalize(),
+                    resized.clone().greyscale().threshold(120),
+                    resized.clone().greyscale().threshold(160),
+                    resized.clone().modulate({ brightness: 1.2, saturation: 0 }),
+                ];
+
+                for (let f = 0; f < filters.length; f++) {
+                    try {
+                        const { data, info } = await filters[f]
+                            .ensureAlpha()
+                            .raw()
+                            .toBuffer({ resolveWithObject: true });
+
+                        const code = jsQR(
+                            new Uint8ClampedArray(data),
+                            info.width,
+                            info.height
+                        );
+
+                        if (code && code.data) {
+                            return code.data;
+                        }
+                    } catch (e) {}
                 }
             }
         }
+
         return null;
     } catch (e) {
-        return null; // Error diam-diam tanpa console.log
+        return null;
     }
 }
 
