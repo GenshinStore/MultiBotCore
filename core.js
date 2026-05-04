@@ -2,11 +2,12 @@ const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion,
 const pino = require('pino');
 const qrcode = require('qrcode');
 const qrcodeTerminal = require('qrcode-terminal');
+const fs = require('fs');
+const crypto = require('crypto');
+const https = require('https');
 const Jimp = require('jimp');
 const QrCode = require('qrcode-reader');
 const sharp = require('sharp');
-const fs = require('fs');
-const crypto = require('crypto');
 
 require('events').EventEmitter.defaultMaxListeners = 0;
 
@@ -16,8 +17,8 @@ const PRIMARY_GROUP_ID = '120363408426078537@g.us';
 const SECONDARY_GROUP_ID = '120363426296094605@g.us';
 
 const ENABLE_FORWARD_TO_SECONDARY = true;
-const DELAY_SECONDARY_MS = 1000; 
-const CACHE_TTL_MS = 5 * 60 * 1000; 
+const DELAY_SECONDARY_MS = 60000; // ⏱ Atur Delay Grup Kedua (60000 = 60 detik)
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 Menit Anti-Duplikat
 
 // ================= GLOBAL STATE =================
 let adminSock = null;
@@ -27,23 +28,37 @@ const pendingApprovals = new Map();
 const duplicateCache = new Map(); 
 const allBotJids = new Set(); 
 
-// ================= HELPER: DETEKSI QR & MEDIA =================
+// ================= HELPER MEDIA & QR SCANNER =================
 async function downloadMedia(mediaMsg, type) {
-    const stream = await downloadContentFromMessage(mediaMsg, type);
-    let buffer = Buffer.from([]);
-    for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-    return buffer;
+    try {
+        const stream = await downloadContentFromMessage(mediaMsg, type);
+        let buffer = Buffer.from([]);
+        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+        return buffer;
+    } catch (err) {
+        // Fallback jika downloadContentFromMessage gagal (biasanya karena stiker di-cache)
+        const url = mediaMsg.url || (mediaMsg.directPath ? `https://mmg.whatsapp.net${mediaMsg.directPath}` : null);
+        if (!url) throw err;
+        return new Promise((resolve, reject) => {
+            https.get(url, res => {
+                const data = [];
+                res.on('data', chunk => data.push(chunk));
+                res.on('end', () => resolve(Buffer.concat(data)));
+            }).on('error', reject);
+        });
+    }
 }
 
 async function detectQR(buffer) {
     try {
         const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
         const meta = await baseImg.metadata();
+
         const decode = async (buf) => {
             const image = await Jimp.read(buf);
             return new Promise((resolve, reject) => {
                 const qr = new QrCode();
-                qr.callback = (e, v) => (e || !v) ? reject() : resolve(v.result);
+                qr.callback = (e, v) => (e || !v) ? reject(e) : resolve(v.result);
                 qr.decode(image.bitmap);
             });
         };
@@ -51,10 +66,12 @@ async function detectQR(buffer) {
         const cw = Math.floor(meta.width * 0.7);
         const ch = Math.floor(meta.height * 0.6);
 
+        // Eksekusi berbagai variasi kontras & ukuran agar QR stiker yang buram/kecil tetap terbaca
         const buffers = await Promise.all([
             baseImg.clone().png().toBuffer(),
-            baseImg.clone().greyscale().linear(1.5, -50).png().toBuffer(),
-            baseImg.clone().extract({ left: 0, top: 0, width: cw, height: ch }).resize(cw * 2).greyscale().threshold(140).png().toBuffer()
+            baseImg.clone().normalize().greyscale().linear(1.5, -50).png().toBuffer(),
+            baseImg.clone().extract({ left: 0, top: 0, width: cw, height: ch }).resize(cw * 2).greyscale().threshold(140).png().toBuffer(),
+            baseImg.clone().resize(meta.width * 2).greyscale().png().toBuffer() // Upscale untuk stiker resolusi rendah
         ]);
 
         return await Promise.any(buffers.map(decode));
@@ -69,36 +86,44 @@ function isDuplicate(link) {
     const hash = crypto.createHash('md5').update(cleanLink).digest('hex');
     
     if (duplicateCache.has(hash)) return true; 
-    
     duplicateCache.set(hash, Date.now());
     setTimeout(() => duplicateCache.delete(hash), CACHE_TTL_MS);
     return false;
 }
 
-// ================= FILTER & FAST SENDING =================
-function processExtractedLink(sock, url, label) {
-    const uLower = url.toLowerCase();
+// ================= PUSAT EKSTRAKSI LINK (SUPER FAST) =================
+// Fungsi ini otomatis menyaring dan mem-forward apa pun teks masuk (entah itu raw teks / hasil scan QR)
+function processExtractedLink(sock, textRaw, label) {
+    if (!textRaw) return;
     
-    // Filter Ketat: Hanya masukkan DANA Kaget, abaikan minta dana atau link kosong
-    if (uLower.includes('/minta') || uLower.endsWith('dana.id') || uLower.endsWith('dana.id/')) return;
-    if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) return;
-
-    const finalUrl = url.startsWith('http') ? url : 'https://' + url;
+    const regex = /(?:https?:\/\/)?(?:[\w-]+\.)?(?:dana\.id|gopay\.co\.id|shopeepay\.co\.id)[^\s]*/gi;
+    const matches = textRaw.match(regex);
     
-    if (isDuplicate(finalUrl)) return;
+    if (matches) {
+        matches.forEach(url => {
+            const uLower = url.toLowerCase();
+            
+            // Filter Ketat Anti-Jebakan
+            if (uLower.includes('/minta') || uLower.endsWith('dana.id') || uLower.endsWith('dana.id/')) return;
+            if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) return;
 
-    const msg = `${finalUrl}\n\nTipe: ${label}`;
-    
-    if (sock) {
-        // 🚀 GRUP UTAMA (VIP): Instan tanpa antrean
-        sock.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => {});
+            const finalUrl = url.startsWith('http') ? url : 'https://' + url;
+            if (isDuplicate(finalUrl)) return; // Blokir duplikat
 
-        // ⏱️ GRUP KEDUA: Delay terpisah (tidak mengganggu grup utama)
-        if (ENABLE_FORWARD_TO_SECONDARY) {
-            setTimeout(() => {
-                sock.sendMessage(SECONDARY_GROUP_ID, { text: msg }).catch(() => {});
-            }, DELAY_SECONDARY_MS);
-        }
+            const msg = `${finalUrl}\n\nTipe: ${label}`;
+            
+            if (sock) {
+                // 🚀 GRUP UTAMA (VIP): Tembak instan tanpa delay 0 detik!
+                sock.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => {});
+
+                // ⏱️ GRUP KEDUA (Reguler): Delay tidak memengaruhi Grup Utama
+                if (ENABLE_FORWARD_TO_SECONDARY) {
+                    setTimeout(() => {
+                        sock.sendMessage(SECONDARY_GROUP_ID, { text: msg }).catch(() => {});
+                    }, DELAY_SECONDARY_MS);
+                }
+            }
+        });
     }
 }
 
@@ -141,21 +166,14 @@ async function startWorkerBot(botId) {
         }
     });
 
-    // DETEKSI DESKRIPSI GRUP
+    // 1. DETEKSI PERUBAHAN DESKRIPSI GRUP
     sock.ev.on('groups.update', updates => {
         for (const u of updates) {
-            if (u.desc) {
-                const descText = u.desc.toString();
-                const regex = /(?:https?:\/\/)?(?:[\w-]+\.)?(?:dana\.id|gopay\.co\.id|shopeepay\.co\.id)[^\s]*/gi;
-                const matches = descText.match(regex);
-                if (matches) {
-                    matches.forEach(url => processExtractedLink(sock, url, 'Deskripsi Grup'));
-                }
-            }
+            if (u.desc) processExtractedLink(sock, u.desc.toString(), 'Deskripsi Grup');
         }
     });
 
-    // DETEKSI PESAN & MEDIA
+    // 2. DETEKSI PESAN CHAT & MEDIA (GAMBAR/STIKER)
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         const msg = messages[0];
@@ -167,7 +185,7 @@ async function startWorkerBot(botId) {
         const senderRaw = msg.key.participant || msg.key.remoteJid;
         const senderJid = senderRaw ? senderRaw.split(':')[0] + '@s.whatsapp.net' : '';
 
-        // 🛑 ANTI-TABRAKAN: Abaikan pesan dari sesama bot di sistem ini
+        // 🛑 ANTI-TABRAKAN BOT: Abaikan pesan dari sesama bot kita
         if (allBotJids.has(senderJid)) return;
 
         let m = msg.message;
@@ -175,16 +193,11 @@ async function startWorkerBot(botId) {
         if (m.viewOnceMessage) m = m.viewOnceMessage.message;
         if (m.viewOnceMessageV2) m = m.viewOnceMessageV2.message;
 
-        // 1. Ekstrak dari Teks
+        // Ekstrak dari Teks
         const text = m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || '';
-        const regex = /(?:https?:\/\/)?(?:[\w-]+\.)?(?:dana\.id|gopay\.co\.id|shopeepay\.co\.id)[^\s]*/gi;
-        
-        const matches = text.match(regex);
-        if (matches) {
-            matches.forEach(url => processExtractedLink(sock, url, 'Link Teks'));
-        }
+        if (text) processExtractedLink(sock, text, 'Link Teks');
 
-        // 2. Ekstrak dari QR Image / Sticker (Berjalan di background)
+        // Ekstrak dari Media (Background Process, tidak mengganggu kecepatan link teks)
         const media = m.imageMessage || m.stickerMessage;
         if (media) {
             const typeMedia = m.imageMessage ? 'image' : 'sticker';
@@ -192,14 +205,8 @@ async function startWorkerBot(botId) {
                 try {
                     const buffer = await downloadMedia(media, typeMedia);
                     const qrResult = await detectQR(buffer);
-                    
-                    if (qrResult) {
-                        const qrMatches = qrResult.match(regex);
-                        if (qrMatches) {
-                            qrMatches.forEach(url => processExtractedLink(sock, url, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker'));
-                        }
-                    }
-                } catch (e) { } // Abaikan error render media
+                    if (qrResult) processExtractedLink(sock, qrResult, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker');
+                } catch (e) {} 
             })();
         }
     });
@@ -253,8 +260,8 @@ async function startAdminBot() {
         if (from !== ADMIN_GROUP_ID) return;
 
         const actionText = text.trim().toUpperCase();
+
         const contextInfo = msg.message.extendedTextMessage?.contextInfo;
-        
         if (contextInfo?.stanzaId && pendingApprovals.has(contextInfo.stanzaId)) {
             const botId = pendingApprovals.get(contextInfo.stanzaId);
 
@@ -280,7 +287,7 @@ async function startAdminBot() {
 
         if (text.startsWith('!reqbot')) {
             const botId = text.split(' ')[1];
-            if (!botId) return adminSock.sendMessage(from, { text: 'Format: !reqbot <id>' });
+            if (!botId) return adminSock.sendMessage(from, { text: '⚠️ Format: !reqbot <id>' });
             
             const folderName = `auth_info_bot${botId}`;
             if (activeBots.has(botId) || fs.existsSync(folderName)) {
@@ -364,15 +371,11 @@ async function startAdminBot() {
                 fs.rmSync(`auth_info_bot${setup.botId}`, { recursive: true, force: true });
                 pendingSetups.delete(sender);
                 await adminSock.sendMessage(from, { text: '❌ Proses dibatalkan.' });
-            } else {
-                await adminSock.sendMessage(from, { text: '⚠️ Tidak ada proses penambahan bot yang sedang berjalan.' });
             }
         }
 
         if (text === '!list') {
             let reply = `*🔥 DAFTAR BOT AKTIF (${activeBots.size})*\n`;
-            if (activeBots.size === 0) reply = `⚠️ Saat ini belum ada bot pekerja yang aktif.`;
-            
             for (let [id, data] of activeBots.entries()) {
                 const uptime = Math.floor((Date.now() - data.startTime) / 60000);
                 reply += `\n🤖 Bot ID: *${id}*\n⏱ Uptime: ${uptime} Menit\n`;
@@ -380,33 +383,40 @@ async function startAdminBot() {
             await adminSock.sendMessage(from, { text: reply });
         }
 
-        if (text.startsWith('!stop ')) {
+        // ================= PENYEMPURNAAN BALASAN ADMIN =================
+        if (text.startsWith('!stop')) {
             const id = text.split(' ')[1];
+            if (!id) return adminSock.sendMessage(from, { text: '⚠️ Format yang benar: !stop <id>' });
+            
             if (activeBots.has(id)) {
                 activeBots.get(id).sock.ws.close();
                 activeBots.delete(id);
                 await adminSock.sendMessage(from, { text: `🛑 Bot ${id} berhasil dihentikan.` });
             } else {
-                await adminSock.sendMessage(from, { text: `⚠️ Gagal. Bot ${id} tidak sedang aktif.` });
+                await adminSock.sendMessage(from, { text: `⚠️ Bot ${id} tidak sedang aktif saat ini.` });
             }
         }
 
-        if (text.startsWith('!start ')) {
+        if (text.startsWith('!start')) {
             const id = text.split(' ')[1];
+            if (!id) return adminSock.sendMessage(from, { text: '⚠️ Format yang benar: !start <id>' });
+            
             if (!activeBots.has(id)) {
                 if (fs.existsSync(`auth_info_bot${id}`)) {
                     await adminSock.sendMessage(from, { text: `🟢 Memulai bot ${id}...` });
                     startWorkerBot(id);
                 } else {
-                    await adminSock.sendMessage(from, { text: `❌ Sesi untuk Bot ${id} tidak ditemukan. Silakan tambahkan bot baru dengan *!reqbot ${id}*` });
+                    await adminSock.sendMessage(from, { text: `❌ Gagal: Sesi untuk Bot ${id} tidak ditemukan. Harus didaftarkan dulu dengan *!reqbot ${id}*` });
                 }
             } else {
-                await adminSock.sendMessage(from, { text: `⚠️ Bot ${id} sudah dalam keadaan berjalan.` });
+                await adminSock.sendMessage(from, { text: `⚠️ Gagal: Bot ${id} sudah dalam keadaan berjalan.` });
             }
         }
 
-        if (text.startsWith('!restart ')) {
+        if (text.startsWith('!restart')) {
             const id = text.split(' ')[1];
+            if (!id) return adminSock.sendMessage(from, { text: '⚠️ Format yang benar: !restart <id>' });
+            
             if (activeBots.has(id)) {
                 await adminSock.sendMessage(from, { text: `🔄 Restarting bot ${id}...` });
                 activeBots.get(id).sock.ws.close();
