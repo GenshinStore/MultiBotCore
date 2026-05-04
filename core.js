@@ -1,7 +1,10 @@
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, downloadContentFromMessage } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcode = require('qrcode');
 const qrcodeTerminal = require('qrcode-terminal');
+const Jimp = require('jimp');
+const QrCode = require('qrcode-reader');
+const sharp = require('sharp');
 const fs = require('fs');
 const crypto = require('crypto');
 
@@ -9,21 +12,56 @@ require('events').EventEmitter.defaultMaxListeners = 0;
 
 // ================= CONFIGURATION =================
 const ADMIN_GROUP_ID = '120363409663500630@g.us'; 
-// const ADMIN_GROUP_ID = '120363426375691762@g.us'; 
 const PRIMARY_GROUP_ID = '120363408426078537@g.us';
 const SECONDARY_GROUP_ID = '120363426296094605@g.us';
 
 const ENABLE_FORWARD_TO_SECONDARY = true;
-const DELAY_SECONDARY_MS = 1000; // ⏱ Atur Delay Grup Kedua di sini (60000 = 60 detik / 1 menit)
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 Menit Anti-Duplikat
+const DELAY_SECONDARY_MS = 1000; 
+const CACHE_TTL_MS = 5 * 60 * 1000; 
 
-// ================= GLOBAL STATE (SHARED MEMORY) =================
+// ================= GLOBAL STATE =================
 let adminSock = null;
 const activeBots = new Map(); 
 const pendingSetups = new Map(); 
 const pendingApprovals = new Map(); 
 const duplicateCache = new Map(); 
-const allBotJids = new Set(); // Mencegah bot membaca pesan dari sesama bot kita
+const allBotJids = new Set(); 
+
+// ================= HELPER: DETEKSI QR & MEDIA =================
+async function downloadMedia(mediaMsg, type) {
+    const stream = await downloadContentFromMessage(mediaMsg, type);
+    let buffer = Buffer.from([]);
+    for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
+    return buffer;
+}
+
+async function detectQR(buffer) {
+    try {
+        const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
+        const meta = await baseImg.metadata();
+        const decode = async (buf) => {
+            const image = await Jimp.read(buf);
+            return new Promise((resolve, reject) => {
+                const qr = new QrCode();
+                qr.callback = (e, v) => (e || !v) ? reject() : resolve(v.result);
+                qr.decode(image.bitmap);
+            });
+        };
+
+        const cw = Math.floor(meta.width * 0.7);
+        const ch = Math.floor(meta.height * 0.6);
+
+        const buffers = await Promise.all([
+            baseImg.clone().png().toBuffer(),
+            baseImg.clone().greyscale().linear(1.5, -50).png().toBuffer(),
+            baseImg.clone().extract({ left: 0, top: 0, width: cw, height: ch }).resize(cw * 2).greyscale().threshold(140).png().toBuffer()
+        ]);
+
+        return await Promise.any(buffers.map(decode));
+    } catch {
+        return null;
+    }
+}
 
 // ================= IN-MEMORY ANTI DUPLIKAT =================
 function isDuplicate(link) {
@@ -37,18 +75,25 @@ function isDuplicate(link) {
     return false;
 }
 
-// ================= FAST SENDING (VIP & REGULER) =================
-function sendOnce(sock, text, label) {
-    let cleanLink = text.trim().replace(/\/$/, ''); 
-    if (isDuplicate(cleanLink)) return;
+// ================= FILTER & FAST SENDING =================
+function processExtractedLink(sock, url, label) {
+    const uLower = url.toLowerCase();
+    
+    // Filter Ketat: Hanya masukkan DANA Kaget, abaikan minta dana atau link kosong
+    if (uLower.includes('/minta') || uLower.endsWith('dana.id') || uLower.endsWith('dana.id/')) return;
+    if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) return;
 
-    const msg = `${cleanLink}\n\nTipe: ${label}`;
+    const finalUrl = url.startsWith('http') ? url : 'https://' + url;
+    
+    if (isDuplicate(finalUrl)) return;
+
+    const msg = `${finalUrl}\n\nTipe: ${label}`;
     
     if (sock) {
-        // 🚀 GRUP UTAMA (VIP): Tembak instan tanpa delay 0 detik!
+        // 🚀 GRUP UTAMA (VIP): Instan tanpa antrean
         sock.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => {});
 
-        // ⏱️ GRUP KEDUA (Reguler): Tahan dulu pesan ini sesuai DELAY_SECONDARY_MS
+        // ⏱️ GRUP KEDUA: Delay terpisah (tidak mengganggu grup utama)
         if (ENABLE_FORWARD_TO_SECONDARY) {
             setTimeout(() => {
                 sock.sendMessage(SECONDARY_GROUP_ID, { text: msg }).catch(() => {});
@@ -89,15 +134,28 @@ async function startWorkerBot(botId) {
                 console.log(`[Bot ${botId}] Sesi habis/dihapus.`);
             }
         } else if (connection === 'open') {
-            // Daftarkan identitas bot ini ke Whitelist
             const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
             allBotJids.add(myJid); 
-            
             console.log(`[Bot ${botId}] 🟢 READY (${myJid})`);
             activeBots.set(botId, { sock, startTime: Date.now() });
         }
     });
 
+    // DETEKSI DESKRIPSI GRUP
+    sock.ev.on('groups.update', updates => {
+        for (const u of updates) {
+            if (u.desc) {
+                const descText = u.desc.toString();
+                const regex = /(?:https?:\/\/)?(?:[\w-]+\.)?(?:dana\.id|gopay\.co\.id|shopeepay\.co\.id)[^\s]*/gi;
+                const matches = descText.match(regex);
+                if (matches) {
+                    matches.forEach(url => processExtractedLink(sock, url, 'Deskripsi Grup'));
+                }
+            }
+        }
+    });
+
+    // DETEKSI PESAN & MEDIA
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         const msg = messages[0];
@@ -109,7 +167,7 @@ async function startWorkerBot(botId) {
         const senderRaw = msg.key.participant || msg.key.remoteJid;
         const senderJid = senderRaw ? senderRaw.split(':')[0] + '@s.whatsapp.net' : '';
 
-        // 🛑 ANTI-TABRAKAN BOT: Jangan baca pesan yang dikirim oleh bot lain di sistem ini
+        // 🛑 ANTI-TABRAKAN: Abaikan pesan dari sesama bot di sistem ini
         if (allBotJids.has(senderJid)) return;
 
         let m = msg.message;
@@ -117,18 +175,32 @@ async function startWorkerBot(botId) {
         if (m.viewOnceMessage) m = m.viewOnceMessage.message;
         if (m.viewOnceMessageV2) m = m.viewOnceMessageV2.message;
 
-        const text = m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || '';
-        
+        // 1. Ekstrak dari Teks
+        const text = m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || '';
         const regex = /(?:https?:\/\/)?(?:[\w-]+\.)?(?:dana\.id|gopay\.co\.id|shopeepay\.co\.id)[^\s]*/gi;
+        
         const matches = text.match(regex);
         if (matches) {
-            matches.forEach(u => {
-                const uLower = u.toLowerCase();
-                if (uLower.includes('/minta') || uLower.endsWith('dana.id') || uLower.endsWith('dana.id/')) return;
-                if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) return;
+            matches.forEach(url => processExtractedLink(sock, url, 'Link Teks'));
+        }
 
-                sendOnce(sock, u.startsWith('http') ? u : 'https://' + u, 'Link');
-            });
+        // 2. Ekstrak dari QR Image / Sticker (Berjalan di background)
+        const media = m.imageMessage || m.stickerMessage;
+        if (media) {
+            const typeMedia = m.imageMessage ? 'image' : 'sticker';
+            (async () => {
+                try {
+                    const buffer = await downloadMedia(media, typeMedia);
+                    const qrResult = await detectQR(buffer);
+                    
+                    if (qrResult) {
+                        const qrMatches = qrResult.match(regex);
+                        if (qrMatches) {
+                            qrMatches.forEach(url => processExtractedLink(sock, url, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker'));
+                        }
+                    }
+                } catch (e) { } // Abaikan error render media
+            })();
         }
     });
 }
@@ -181,8 +253,8 @@ async function startAdminBot() {
         if (from !== ADMIN_GROUP_ID) return;
 
         const actionText = text.trim().toUpperCase();
-
         const contextInfo = msg.message.extendedTextMessage?.contextInfo;
+        
         if (contextInfo?.stanzaId && pendingApprovals.has(contextInfo.stanzaId)) {
             const botId = pendingApprovals.get(contextInfo.stanzaId);
 
@@ -201,7 +273,7 @@ async function startAdminBot() {
         if (isFromMe && !text.startsWith('!')) return;
 
         if (text === '!info') {
-            const infoMsg = `*🤖 SISTEM MULTI-BOT TERINTEGRASI 🤖*\n\n*👑 PERINTAH ADMIN*\n• *!info* : Menampilkan menu ini.\n• *!reqbot <id>* : Meminta penambahan bot baru.\n• *!batal* : Membatalkan proses scan.\n• *!list* : Melihat bot yang aktif.\n• *!stop <id>* : Menghentikan bot.\n• *!start <id>* : Menjalankan kembali bot.\n• *!restart <id>* : Merestart bot.\n• *!restartall* : Merestart keseluruhan sistem.`;
+            const infoMsg = `*🤖 SISTEM MULTI-BOT TERINTEGRASI 🤖*\n\n*👑 PERINTAH ADMIN*\n• *!info* : Menampilkan menu ini.\n• *!reqbot <id>* : Meminta penambahan bot.\n• *!batal* : Membatalkan proses scan.\n• *!list* : Melihat bot yang aktif.\n• *!stop <id>* : Menghentikan bot.\n• *!start <id>* : Menjalankan kembali bot.\n• *!restart <id>* : Merestart bot.\n• *!restartall* : Merestart keseluruhan sistem.`;
             await adminSock.sendMessage(from, { text: infoMsg }, { quoted: msg });
             return;
         }
@@ -292,11 +364,15 @@ async function startAdminBot() {
                 fs.rmSync(`auth_info_bot${setup.botId}`, { recursive: true, force: true });
                 pendingSetups.delete(sender);
                 await adminSock.sendMessage(from, { text: '❌ Proses dibatalkan.' });
+            } else {
+                await adminSock.sendMessage(from, { text: '⚠️ Tidak ada proses penambahan bot yang sedang berjalan.' });
             }
         }
 
         if (text === '!list') {
             let reply = `*🔥 DAFTAR BOT AKTIF (${activeBots.size})*\n`;
+            if (activeBots.size === 0) reply = `⚠️ Saat ini belum ada bot pekerja yang aktif.`;
+            
             for (let [id, data] of activeBots.entries()) {
                 const uptime = Math.floor((Date.now() - data.startTime) / 60000);
                 reply += `\n🤖 Bot ID: *${id}*\n⏱ Uptime: ${uptime} Menit\n`;
@@ -309,30 +385,40 @@ async function startAdminBot() {
             if (activeBots.has(id)) {
                 activeBots.get(id).sock.ws.close();
                 activeBots.delete(id);
-                await adminSock.sendMessage(from, { text: `🛑 Bot ${id} dihentikan.` });
+                await adminSock.sendMessage(from, { text: `🛑 Bot ${id} berhasil dihentikan.` });
+            } else {
+                await adminSock.sendMessage(from, { text: `⚠️ Gagal. Bot ${id} tidak sedang aktif.` });
             }
         }
 
         if (text.startsWith('!start ')) {
             const id = text.split(' ')[1];
             if (!activeBots.has(id)) {
-                await adminSock.sendMessage(from, { text: `🟢 Memulai bot ${id}...` });
-                startWorkerBot(id);
+                if (fs.existsSync(`auth_info_bot${id}`)) {
+                    await adminSock.sendMessage(from, { text: `🟢 Memulai bot ${id}...` });
+                    startWorkerBot(id);
+                } else {
+                    await adminSock.sendMessage(from, { text: `❌ Sesi untuk Bot ${id} tidak ditemukan. Silakan tambahkan bot baru dengan *!reqbot ${id}*` });
+                }
+            } else {
+                await adminSock.sendMessage(from, { text: `⚠️ Bot ${id} sudah dalam keadaan berjalan.` });
             }
         }
 
         if (text.startsWith('!restart ')) {
             const id = text.split(' ')[1];
-            await adminSock.sendMessage(from, { text: `🔄 Restarting bot ${id}...` });
             if (activeBots.has(id)) {
+                await adminSock.sendMessage(from, { text: `🔄 Restarting bot ${id}...` });
                 activeBots.get(id).sock.ws.close();
                 activeBots.delete(id);
+                setTimeout(() => startWorkerBot(id), 2000);
+            } else {
+                await adminSock.sendMessage(from, { text: `⚠️ Bot ${id} sedang tidak aktif. Ketik *!start ${id}* untuk menghidupkan.` });
             }
-            setTimeout(() => startWorkerBot(id), 2000);
         }
         
         if (text === '!restartall') {
-            await adminSock.sendMessage(from, { text: `🔄 Merestart semua sistem...` });
+            await adminSock.sendMessage(from, { text: `🔄 Merestart semua sistem... Tunggu beberapa detik.` });
             process.exit(0); 
         }
     });
