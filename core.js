@@ -57,7 +57,7 @@ async function detectQR(buffer) {
     try {
         console.log(`\n[DEBUG-QR] Memulai scan media...`);
         
-        // 1. WAJIB: Beri background putih untuk stiker yang transparan
+        // 1. WAJIB: Background putih untuk transparansi WebP/PNG
         const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
         const meta = await baseImg.metadata();
         let w = meta.width;
@@ -65,13 +65,28 @@ async function detectQR(buffer) {
 
         if (!w || !h) return null;
 
-        // 2. AUTO-UPSCALE: Perbesar gambar kecil (seperti stiker) agar titik QR renggang
+        // 2. TAMBAH PADDING (QUIET ZONE): 
+        // QR Code WAJIB punya ruang putih di sekelilingnya. Stiker sering dipotong terlalu mepet.
+        const paddedImg = baseImg.extend({
+            top: 60, bottom: 60, left: 60, right: 60,
+            background: '#ffffff'
+        });
+
+        // Update dimensi setelah ditambah bingkai putih
+        w += 120;
+        h += 120;
+
+        // 3. AUTO-UPSCALE DENGAN NEAREST NEIGHBOR
+        // Jika stiker kecil, zoom-in. 'kernel.nearest' memastikan gambar tetap tajam (kotak-kotak), TIDAK BLUR!
         const scale = Math.max(1, 1000 / Math.max(w, h));
         const newW = Math.floor(w * scale);
         const newH = Math.floor(h * scale);
-        const upscaledImg = baseImg.resize(newW, newH);
+        
+        const upscaledImg = paddedImg.resize(newW, newH, { 
+            kernel: sharp.kernel.nearest 
+        });
 
-        // 3. POTONG AREA FOKUS
+        // 4. POTONG AREA FOKUS
         let crops = [
             { name: 'Full Layar', img: upscaledImg.clone() }
         ];
@@ -91,7 +106,7 @@ async function detectQR(buffer) {
             img: upscaledImg.clone().extract({ left: 0, top: 0, width: newW, height: Math.floor(newH * 0.7) })
         });
 
-        // 4. PROSES SCAN
+        // 5. PROSES SCAN
         for (let i = 0; i < crops.length; i++) {
             const imgObj = crops[i].img.resize(800, 800, { fit: 'inside', withoutEnlargement: true });
             
@@ -103,7 +118,7 @@ async function detectQR(buffer) {
 
             for (let j = 0; j < filters.length; j++) {
                 try {
-                    // KUNCI UTAMA: .ensureAlpha() harus di akhir agar output PASTI 4 Channel (RGBA)
+                    // Pastikan 4 Channel RGBA agar jsQR tidak error
                     const { data, info } = await filters[j].img
                         .ensureAlpha()
                         .raw()
@@ -117,7 +132,7 @@ async function detectQR(buffer) {
                         return decoded.data;
                     }
                 } catch (err) {
-                    continue; // Jika filter ini gagal diproses, lanjut ke filter berikutnya
+                    continue; 
                 }
             }
         }
