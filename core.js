@@ -6,7 +6,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const https = require('https');
 const Jimp = require('jimp');
-const jsQR = require('jsqr'); // <-- KITA MENGGUNAKAN SCANNER BARU YANG LEBIH KUAT
+const QrCode = require('qrcode-reader');
 const sharp = require('sharp');
 
 require('events').EventEmitter.defaultMaxListeners = 0;
@@ -19,6 +19,7 @@ const SECONDARY_GROUP_ID = '120363426296094605@g.us';
 const ENABLE_FORWARD_TO_SECONDARY = true;
 const DELAY_SECONDARY_MS = 1000; 
 const CACHE_TTL_MS = 5 * 60 * 1000; 
+const VALID_DOMAINS = /(dana\.id|gopay\.co\.id|shopeepay\.co\.id)/i;
 
 // ================= GLOBAL STATE =================
 let adminSock = null;
@@ -28,51 +29,56 @@ const pendingApprovals = new Map();
 const duplicateCache = new Map(); 
 const allBotJids = new Set(); 
 
-// ================= HELPER MEDIA & QR SCANNER (JSQR) =================
+// ================= HELPER MEDIA & QR SCANNER =================
 async function downloadMedia(mediaMsg, type) {
     try {
-        const stream = await downloadContentFromMessage(mediaMsg, type);
-        let buffer = Buffer.from([]);
-        for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
-        return buffer;
-    } catch (err) {
-        const url = mediaMsg.url || (mediaMsg.directPath ? `https://mmg.whatsapp.net${mediaMsg.directPath}` : null);
-        if (!url) throw err;
-        return new Promise((resolve, reject) => {
-            https.get(url, res => {
-                const data = [];
-                res.on('data', chunk => data.push(chunk));
-                res.on('end', () => resolve(Buffer.concat(data)));
-            }).on('error', reject);
-        });
-    }
+        if (mediaMsg.mediaKey) {
+            const stream = await downloadContentFromMessage(mediaMsg, type);
+            let buffer = Buffer.from([]);
+            for await (const chunk of stream) { buffer = Buffer.concat([buffer, chunk]); }
+            return buffer;
+        } 
+        
+        let downloadUrl = mediaMsg.url || (mediaMsg.directPath ? `https://mmg.whatsapp.net${mediaMsg.directPath}` : null);
+        if (downloadUrl) {
+            return new Promise((resolve, reject) => {
+                https.get(downloadUrl, (res) => {
+                    const data = [];
+                    res.on('data', chunk => data.push(chunk));
+                    res.on('end', () => resolve(Buffer.concat(data)));
+                }).on('error', err => reject(err));
+            });
+        }
+        throw new Error('Tidak ada url atau mediaKey');
+    } catch (error) { throw error; }
 }
 
 async function detectQR(buffer) {
     try {
-        // 1. Konversi WebP (Stiker) / JPEG ke PNG mentah + Background Putih
-        // Upscale x2 agar stiker yang kecil/buram jadi tajam
         const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
         const meta = await baseImg.metadata();
-        const scale = meta.width < 500 ? 2 : 1; 
 
-        const pngBuffer = await baseImg
-            .resize(meta.width * scale)
-            .normalize() // Menajamkan kontras hitam putih
-            .png()
-            .toBuffer();
+        const decodeBuffer = async (imgBuf) => {
+            const image = await Jimp.read(imgBuf);
+            return new Promise((resolve, reject) => {
+                const qr = new QrCode();
+                qr.callback = (e, v) => (e || !v) ? reject(e) : resolve(v.result);
+                qr.decode(image.bitmap);
+            });
+        };
 
-        // 2. Ekstrak data pixel mentah
-        const image = await Jimp.read(pngBuffer);
+        const cw1 = Math.floor(meta.width * 0.7); const ch1 = Math.floor(meta.height * 0.6);
+        const cw2 = Math.floor(meta.width * 0.45); const ch2 = Math.floor(meta.height * 0.4);
 
-        // 3. Scan menggunakan jsQR (Kuat tembus logo DANA)
-        const decoded = jsQR(image.bitmap.data, image.bitmap.width, image.bitmap.height);
-        
-        if (decoded && decoded.data) {
-            return decoded.data;
-        }
-        return null;
-    } catch (err) {
+        const buffers = await Promise.all([
+            baseImg.clone().png().toBuffer(),
+            baseImg.clone().greyscale().linear(1.5, -50).png().toBuffer(),
+            baseImg.clone().extract({ left: Math.floor((meta.width - cw1) / 2), top: Math.floor((meta.height - ch1) / 2), width: cw1, height: ch1 }).resize(cw1 * 2).greyscale().threshold(140).png().toBuffer(),
+            baseImg.clone().extract({ left: Math.floor((meta.width - cw2) / 2), top: Math.floor((meta.height - ch2) / 2), width: cw2, height: ch2 }).resize(cw2 * 3).greyscale().linear(2, -100).png().toBuffer()
+        ]);
+
+        return await Promise.any(buffers.map(buf => decodeBuffer(buf)));
+    } catch {
         return null;
     }
 }
@@ -88,7 +94,7 @@ function isDuplicate(link) {
     return false;
 }
 
-// ================= PUSAT EKSTRAKSI LINK (SUPER FAST) =================
+// ================= PUSAT EKSTRAKSI LINK =================
 function processExtractedLink(sock, textRaw, label) {
     if (!textRaw) return;
     
@@ -109,7 +115,6 @@ function processExtractedLink(sock, textRaw, label) {
             
             if (sock) {
                 sock.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => {});
-
                 if (ENABLE_FORWARD_TO_SECONDARY) {
                     setTimeout(() => {
                         sock.sendMessage(SECONDARY_GROUP_ID, { text: msg }).catch(() => {});
@@ -141,7 +146,6 @@ async function startWorkerBot(botId) {
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
-        
         if (connection === 'close') {
             const reason = lastDisconnect?.error?.output?.statusCode;
             activeBots.delete(botId);
@@ -168,7 +172,7 @@ async function startWorkerBot(botId) {
         if (!msg.message || msg.key.fromMe) return;
 
         const from = msg.key.remoteJid;
-        if (from === ADMIN_GROUP_ID || from === PRIMARY_GROUP_ID || from === SECONDARY_GROUP_ID) return;
+        if (from === PRIMARY_GROUP_ID || from === SECONDARY_GROUP_ID) return;
 
         const senderRaw = msg.key.participant || msg.key.remoteJid;
         const senderJid = senderRaw ? senderRaw.split(':')[0] + '@s.whatsapp.net' : '';
@@ -179,23 +183,27 @@ async function startWorkerBot(botId) {
         if (m.ephemeralMessage) m = m.ephemeralMessage.message;
         if (m.viewOnceMessage) m = m.viewOnceMessage.message;
         if (m.viewOnceMessageV2) m = m.viewOnceMessageV2.message;
+        if (m.viewOnceMessageV2Extension) m = m.viewOnceMessageV2Extension.message;
+        if (m.documentWithCaptionMessage) m = m.documentWithCaptionMessage.message;
 
         const text = m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || '';
         if (text) processExtractedLink(sock, text, 'Link Teks');
 
-        // Proses Ekstrak QR berjalan di background
-        const media = m.imageMessage || m.stickerMessage;
-        if (media) {
-            const typeMedia = m.imageMessage ? 'image' : 'sticker';
-            (async () => {
-                try {
-                    const buffer = await downloadMedia(media, typeMedia);
-                    const qrResult = await detectQR(buffer);
-                    if (qrResult) {
-                        processExtractedLink(sock, qrResult, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker');
+        const imageMsg = m.imageMessage;
+        const stickerMsg = m.stickerMessage;
+
+        if (imageMsg || stickerMsg) {
+            const mediaMsg = imageMsg || stickerMsg;
+            const typeMedia = imageMsg ? 'image' : 'sticker';
+            
+            downloadMedia(mediaMsg, typeMedia).then(buffer => {
+                detectQR(buffer).then(qrData => {
+                    if (qrData && VALID_DOMAINS.test(qrData)) {
+                        if (qrData.includes('qr.dana.id') || qrData.includes('/minta')) return;
+                        processExtractedLink(sock, qrData, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker');
                     }
-                } catch (e) {} 
-            })();
+                }).catch(() => {});
+            }).catch(() => {});
         }
     });
 }
@@ -224,7 +232,6 @@ async function startAdminBot() {
         } else if (connection === 'open') {
             const myJid = adminSock.user.id.split(':')[0] + '@s.whatsapp.net';
             allBotJids.add(myJid); 
-
             console.log('👑 SYSTEM CORE ADMIN READY!');
             const dirs = fs.readdirSync(__dirname).filter(f => f.startsWith('auth_info_bot'));
             dirs.forEach(dir => startWorkerBot(dir.replace('auth_info_bot', '')));
@@ -245,7 +252,10 @@ async function startAdminBot() {
             return;
         }
 
-        if (from !== ADMIN_GROUP_ID) return;
+        // =========================================================
+        // PERBAIKAN: IZINKAN GRUP ADMIN ATAU PRIVATE CHAT DARI OWNER
+        // =========================================================
+        if (from !== ADMIN_GROUP_ID && from.endsWith('@g.us')) return;
 
         const actionText = text.trim().toUpperCase();
         const contextInfo = msg.message.extendedTextMessage?.contextInfo;
@@ -283,22 +293,15 @@ async function startAdminBot() {
             }
 
             await adminSock.sendMessage(from, { text: `⏳ Generate QR untuk Bot ${botId}...` });
-            
             let isSetupFinished = false;
 
             async function connectSetup() {
                 if (isSetupFinished) return;
-
                 const { version } = await fetchLatestBaileysVersion(); 
                 const { state: tempState, saveCreds: tempSaveCreds } = await useMultiFileAuthState(folderName);
                 
                 const tempSock = makeWASocket({ 
-                    version,
-                    auth: tempState, 
-                    logger: pino({ level: 'silent' }), 
-                    browser: [`Setup-${botId}`, 'Chrome', '1.0.0'],
-                    connectTimeoutMs: 60000,
-                    getMessage: async () => ({ conversation: '' }) 
+                    version, auth: tempState, logger: pino({ level: 'silent' }), browser: [`Setup-${botId}`, 'Chrome', '1.0.0']
                 });
                 
                 tempSock.ev.on('creds.update', tempSaveCreds);
@@ -306,22 +309,15 @@ async function startAdminBot() {
 
                 tempSock.ev.on('connection.update', async (update) => {
                     const { connection, qr, lastDisconnect } = update;
-                    
                     if (qr) {
                         try {
                             const qrBuffer = await qrcode.toBuffer(qr, { scale: 6 });
-                            await adminSock.sendMessage(from, { 
-                                image: qrBuffer, 
-                                caption: `✅ *QR Login Bot ${botId}*\n\nSilakan scan QR ini. Ketik *!batal* jika ingin membatalkan.` 
-                            });
+                            await adminSock.sendMessage(from, { image: qrBuffer, caption: `✅ *QR Login Bot ${botId}*\n\nSilakan scan QR ini. Ketik *!batal* jika ingin membatalkan.` });
                         } catch (err) {}
                     }
-                    
                     if (connection === 'close') {
                         if (isSetupFinished) return;
-                        
-                        const statusCode = lastDisconnect?.error?.output?.statusCode;
-                        if (statusCode !== DisconnectReason.loggedOut) {
+                        if (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut) {
                             setTimeout(connectSetup, 2000); 
                         } else {
                             pendingSetups.delete(sender);
@@ -329,14 +325,9 @@ async function startAdminBot() {
                             await adminSock.sendMessage(from, { text: `❌ Setup Bot dibatalkan.` });
                         }
                     }
-                    
                     if (connection === 'open') {
                         isSetupFinished = true;
-                        try { 
-                            tempSock.ev.removeAllListeners();
-                            tempSock.ws.close(); 
-                        } catch (e) {} 
-                        
+                        try { tempSock.ev.removeAllListeners(); tempSock.ws.close(); } catch (e) {} 
                         pendingSetups.delete(sender);
                         
                         const askMsg = await adminSock.sendMessage(from, { 
@@ -347,7 +338,6 @@ async function startAdminBot() {
                     }
                 });
             }
-
             connectSetup();
             return;
         }
@@ -423,6 +413,7 @@ async function startAdminBot() {
 
 startAdminBot();
 
+// ================= JADWAL OTOMATIS =================
 setInterval(() => {
     const now = new Date();
     const options = { timeZone: 'Asia/Jakarta', hour12: false, hour: '2-digit', minute: '2-digit' };
