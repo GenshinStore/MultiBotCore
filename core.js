@@ -142,7 +142,6 @@ async function startWorkerBot(botId) {
                 }
             });
         }
-        // Catatan: Tambahkan fungsi deteksi QR gambar dari script lama jika dibutuhkan di sini
     });
 }
 
@@ -181,7 +180,15 @@ async function startAdminBot() {
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
         const sender = msg.key.participant || msg.key.remoteJid;
 
-        // Hanya proses perintah di Grup Admin
+        // 0. FITUR CEK ID GRUP (Berfungsi di grup mana saja)
+        if (text === '!idgrup' && from.endsWith('@g.us')) {
+            await adminSock.sendMessage(from, { text: `*ID Grup Ini:*\n${from}` }, { quoted: msg });
+            return;
+        }
+
+        // ============================================================
+        // BATASAN ADMIN: Perintah di bawah ini HANYA jalan di Grup Admin
+        // ============================================================
         if (from !== ADMIN_GROUP_ID) return;
 
         // 1. SISTEM PERSETUJUAN ADMIN (Quote Reply)
