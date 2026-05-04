@@ -5,9 +5,11 @@ const qrcodeTerminal = require('qrcode-terminal');
 const fs = require('fs');
 const crypto = require('crypto');
 const https = require('https');
-const Jimp = require('jimp');
-const jsQR = require('jsqr');
+// const Jimp = require('jimp');
+// const QrCode = require('qrcode-reader');
 const sharp = require('sharp');
+// const sharp = require('sharp');
+const jsQR = require('jsqr');
 
 require('events').EventEmitter.defaultMaxListeners = 0;
 
@@ -56,75 +58,53 @@ async function downloadMedia(mediaMsg, type) {
 async function detectQR(buffer) {
     try {
         console.log(`\n[DEBUG-QR] Memulai scan media...`);
-        const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
+        const baseImg = sharp(buffer);
         const meta = await baseImg.metadata();
         const w = meta.width;
         const h = meta.height;
 
         if (!w || !h) return null;
 
-        // 1. AUTO-UPSCALE: Perbesar stiker kecil agar QR renggang dan mudah discan
-        const scale = Math.max(1, 1000 / Math.max(w, h));
-        const newW = Math.floor(w * scale);
-        const newH = Math.floor(h * scale);
+        // KUNCI: Potong gambar menjadi beberapa area agar fokus ke QR
+        let crops = [ baseImg.clone() ]; // 1. Scan Full Layar
         
-        const upscaledImg = baseImg.resize(newW, newH);
-
-        // 2. PEMOTONGAN AREA CERDAS (SMART CROP)
-        let crops = [
-            { name: 'Full Layar', img: upscaledImg.clone() }
-        ];
-
-        // Crop Khusus Stiker "Cepat!!!": Buang 20% teks atas dan 20% kartun bawah
-        const cropH = Math.floor(newH * 0.6);
-        const cropY = Math.floor((newH - cropH) / 2);
-        crops.push({
-            name: 'Fokus Area Tengah',
-            img: upscaledImg.clone().extract({ left: 0, top: cropY, width: newW, height: cropH })
-        });
-
-        // Crop Presisi untuk Screenshot DANA asli
-        const minDim = Math.min(newW, newH);
-        const size = Math.floor(minDim * 0.85);
-        crops.push({
-            name: 'Fokus Kotak QR',
-            img: upscaledImg.clone().extract({ left: Math.floor((newW - size) / 2), top: Math.floor((newH - size) / 2), width: size, height: size })
-        });
+        if (w >= 300 && h >= 300) {
+            const size = Math.floor(Math.min(w, h) * 0.9);
+            // 2. Scan Khusus Tengah (Bagus untuk Screenshot DANA)
+            crops.push(baseImg.clone().extract({ left: Math.floor((w - size)/2), top: Math.floor((h - size)/2), width: size, height: size })); 
+            // 3. Scan Khusus Atas (Bagus untuk Stiker)
+            crops.push(baseImg.clone().extract({ left: 0, top: 0, width: w, height: Math.floor(h * 0.7) })); 
+        }
 
         for (let i = 0; i < crops.length; i++) {
-            const imgObj = crops[i].img;
-
-            // 3. VARIASI FILTER KONTRAS
+            // Resize gambar max 800px dan paksa format warna menjadi RGBA (Syarat mutlak jsQR)
+            const imgObj = crops[i].resize(800, 800, { fit: 'inside', withoutEnlargement: true }).ensureAlpha();
+            
+            // Variasi Kontras Warna untuk menebus gambar buram
             const filters = [
-                { name: 'Normal', img: imgObj.clone() },
-                { name: 'Hitam Putih', img: imgObj.clone().normalize().greyscale() },
-                { name: 'Kontras Tajam', img: imgObj.clone().greyscale().linear(1.5, -50) },
-                { name: 'Threshold Ekstrem', img: imgObj.clone().greyscale().threshold(140) }
+                imgObj.clone(), // Normal
+                imgObj.clone().normalize().greyscale(), // Hitam Putih Tajam
+                imgObj.clone().greyscale().linear(1.5, -50) // Gelap Terang
             ];
 
             for (let j = 0; j < filters.length; j++) {
-                try {
-                    // Ekstrak buffer sebagai PNG agar Jimp membacanya sempurna (Solusi Malformed Data Error)
-                    const pngBuffer = await filters[j].img.png().toBuffer();
-                    const image = await Jimp.read(pngBuffer);
-                    
-                    const decoded = jsQR(image.bitmap.data, image.bitmap.width, image.bitmap.height);
-                    
-                    if (decoded && decoded.data) {
-                        console.log(`[DEBUG-QR] ✅ QR Terbaca! (Metode: ${crops[i].name} - ${filters[j].name}) ->`, decoded.data);
-                        return decoded.data;
-                    }
-                } catch (err) {
-                    // Lanjut ke filter berikutnya jika filter ini gagal diproses
-                    continue;
+                // Ekstrak pixel mentah (Jauh lebih cepat dari Jimp)
+                const { data, info } = await filters[j].raw().toBuffer({ resolveWithObject: true });
+                const clampedArray = new Uint8ClampedArray(data);
+                
+                // Tembak menggunakan jsQR
+                const decoded = jsQR(clampedArray, info.width, info.height);
+                
+                if (decoded && decoded.data) {
+                    console.log(`[DEBUG-QR] ✅ QR Terbaca! ->`, decoded.data);
+                    return decoded.data;
                 }
             }
         }
-        
-        console.log(`[DEBUG-QR] ❌ GAGAL. QR tidak ditemukan (Mungkin gambar miring / logo menutupi pola).`);
+        console.log(`[DEBUG-QR] ❌ GAGAL. QR tidak ditemukan di media ini.`);
         return null;
     } catch (e) {
-        console.log(`[DEBUG-QR] ❌ Error sistem saat scan:`, e.message);
+        console.log(`[DEBUG-QR] ❌ Error saat scan:`, e.message);
         return null;
     }
 }
@@ -152,13 +132,20 @@ function processExtractedLink(sock, textRaw, label) {
             const uLower = url.toLowerCase();
             
             if (uLower.includes('/minta') || uLower.endsWith('dana.id') || uLower.endsWith('dana.id/')) return;
-            if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) return;
+            
+            // JIKA TERTANGKAP TAPI TIDAK ADA KATA KAGET:
+            if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) {
+                console.log(`[DEBUG-FILTER] ⛔ DIBLOKIR: Link DANA tapi BUKAN kaget -> ${url}`);
+                return;
+            }
 
             const finalUrl = url.startsWith('http') ? url : 'https://' + url;
-            
-            if (isDuplicate(finalUrl)) return; 
+            if (isDuplicate(finalUrl)) {
+                console.log(`[DEBUG-FILTER] ♻️ DUPLIKAT DIABAIKAN -> ${finalUrl}`);
+                return; 
+            }
 
-            console.log(`\n🚀 [BERHASIL!] Menemukan dan meneruskan: ${finalUrl} (Dari ${label})`);
+            console.log(`\n🚀 [TEMBUS!] Meneruskan: ${finalUrl} (Dari ${label})`);
             const msg = `${finalUrl}\n\nTipe: ${label}`;
             
             if (sock) {
@@ -246,7 +233,9 @@ async function startWorkerBot(botId) {
             
             downloadMedia(mediaMsg, typeMedia).then(buffer => {
                 detectQR(buffer).then(qrData => {
-                    if (qrData) processExtractedLink(sock, qrData, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker');
+                    if (qrData) {
+                        processExtractedLink(sock, qrData, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker');
+                    }
                 }).catch(() => {});
             }).catch(() => {});
         }
