@@ -191,7 +191,35 @@ async function startAdminBot() {
         // ============================================================
         if (from !== ADMIN_GROUP_ID) return;
 
-        // 1. SISTEM PERSETUJUAN ADMIN (Quote Reply)
+        // 1. FITUR INFO PANDUAN PENGGUNAAN
+        if (text === '!info') {
+            const infoMsg = `*🤖 SISTEM MULTI-BOT TERINTEGRASI 🤖*
+
+Berikut adalah panduan penggunaan sistem bot:
+
+*👥 PERINTAH UMUM (Grup Mana Saja)*
+• *!idgrup* : Mengecek ID grup saat ini (berguna untuk config).
+
+*👑 PERINTAH ADMIN (Hanya Grup Admin)*
+• *!info* : Menampilkan menu panduan ini.
+• *!reqbot <id>* : Meminta penambahan bot baru (contoh: !reqbot 1). Menampilkan QR.
+• *!batal* : Membatalkan proses scan QR saat penambahan bot.
+• *!list* : Melihat daftar bot yang aktif beserta uptime (waktu aktif).
+• *!stop <id>* : Menghentikan jalannya bot spesifik (contoh: !stop 1).
+• *!start <id>* : Menjalankan kembali bot yang dihentikan (contoh: !start 1).
+• *!restart <id>* : Merestart bot tertentu (contoh: !restart 1).
+• *!restartall* : Merestart keseluruhan sistem core dan semua bot aktif.
+
+*✅ SISTEM PERSETUJUAN (Khusus Admin)*
+Ketika ada user scan QR bot baru, akan muncul pesan konfirmasi di grup ini:
+• Balas pesan bot dengan *OKE* atau *IYA* untuk menyetujui & menyalakan bot.
+• Balas pesan bot dengan *TIDAK* untuk menolak & menghapus akses bot tersebut.`;
+
+            await adminSock.sendMessage(from, { text: infoMsg }, { quoted: msg });
+            return;
+        }
+
+        // 2. SISTEM PERSETUJUAN ADMIN (Quote Reply)
         const contextInfo = msg.message.extendedTextMessage?.contextInfo;
         if (contextInfo?.stanzaId && pendingApprovals.has(contextInfo.stanzaId)) {
             const botId = pendingApprovals.get(contextInfo.stanzaId);
@@ -209,7 +237,7 @@ async function startAdminBot() {
             return;
         }
 
-        // 2. REQUEST TAMBAH BOT OLEH USER
+        // 3. REQUEST TAMBAH BOT OLEH USER
         if (text.startsWith('!reqbot')) {
             const botId = text.split(' ')[1];
             if (!botId) return adminSock.sendMessage(from, { text: 'Format: !reqbot <id>' });
@@ -246,7 +274,7 @@ async function startAdminBot() {
             return;
         }
 
-        // 3. BATALKAN REQUEST OLEH USER
+        // 4. BATALKAN REQUEST OLEH USER
         if (text === '!batal') {
             if (pendingSetups.has(sender)) {
                 const setup = pendingSetups.get(sender);
@@ -257,7 +285,7 @@ async function startAdminBot() {
             }
         }
 
-        // 4. MANAJEMEN BOT (START / STOP / RESTART / LIST)
+        // 5. MANAJEMEN BOT (START / STOP / RESTART / LIST)
         if (text === '!list') {
             let reply = `*🔥 DAFTAR BOT AKTIF (${activeBots.size})*\n`;
             for (let [id, data] of activeBots.entries()) {
