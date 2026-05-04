@@ -50,32 +50,32 @@ async function processQueue() {
     isProcessingQueue = true;
 
     while (secondaryQueue.length > 0) {
-        const msg = secondaryQueue.shift();
+        // Ambil socket pengirim asli beserta pesannya
+        const { sock, text } = secondaryQueue.shift();
         try {
-            const forwarder = adminSock || activeBots.values().next().value?.sock;
-            if (forwarder) await forwarder.sendMessage(SECONDARY_GROUP_ID, { text: msg });
+            if (sock) await sock.sendMessage(SECONDARY_GROUP_ID, { text });
         } catch (e) { console.error("Gagal forward ke secondary", e); }
         await new Promise(res => setTimeout(res, DELAY_MS));
     }
     isProcessingQueue = false;
 }
 
-function sendToSecondary(msg) {
+function sendToSecondary(sock, msg) {
     if (secondaryQueue.length >= 100) secondaryQueue.shift();
-    secondaryQueue.push(msg);
+    secondaryQueue.push({ sock, text: msg }); // Simpan socket bot yang mendeteksi
     processQueue();
 }
 
-function sendOnce(text, label) {
+function sendOnce(sock, text, label) {
     const key = text.trim();
     if (isDuplicate(key)) return;
 
     const msg = `${key}\n\nTipe: ${label}`;
     
-    const forwarder = adminSock || activeBots.values().next().value?.sock;
-    if (forwarder) {
-        forwarder.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => {});
-        if (ENABLE_FORWARD_TO_SECONDARY) sendToSecondary(msg);
+    // Gunakan socket dari bot penemu, BUKAN adminSock
+    if (sock) {
+        sock.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => {});
+        if (ENABLE_FORWARD_TO_SECONDARY) sendToSecondary(sock, msg);
     }
 }
 
@@ -138,7 +138,8 @@ async function startWorkerBot(botId) {
                 if (uLower.includes('/minta') || uLower.endsWith('dana.id') || uLower.endsWith('dana.id/')) return;
                 if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) return;
 
-                sendOnce(u.startsWith('http') ? u : 'https://' + u, 'Link');
+                // Lempar variabel "sock" dari bot ini ke fungsi sendOnce
+                sendOnce(sock, u.startsWith('http') ? u : 'https://' + u, 'Link');
             });
         }
     });
@@ -173,7 +174,7 @@ async function startAdminBot() {
 
     adminSock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
-        if (!msg.message) return; // Membuka akses agar Admin bisa balas dari HP sendiri
+        if (!msg.message) return; 
 
         const from = msg.key.remoteJid;
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
@@ -210,7 +211,6 @@ async function startAdminBot() {
             return;
         }
 
-        // Filter: Cegah bot merespon obrolan biasa dirinya sendiri (kecuali perintah berawalan !)
         if (isFromMe && !text.startsWith('!')) return;
 
         // 2. FITUR INFO PANDUAN PENGGUNAAN
