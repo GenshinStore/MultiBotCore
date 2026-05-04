@@ -13,7 +13,7 @@ const crypto = require('crypto');
 require('events').EventEmitter.defaultMaxListeners = 0;
 
 // ================= CONFIGURATION =================
-const ADMIN_GROUP_ID = '120363426375691762@g.us'; // GANTI DENGAN ID GRUP ADMIN
+const ADMIN_GROUP_ID = '120363426375691762@g.us'; // ID Grup Admin Anda
 const PRIMARY_GROUP_ID = '120363408426078537@g.us';
 const SECONDARY_GROUP_ID = '120363426296094605@g.us';
 
@@ -25,10 +25,10 @@ const VALID_DOMAINS = /(dana\.id|gopay\.co\.id|shopeepay\.co\.id)/i;
 
 // ================= GLOBAL STATE (SHARED MEMORY) =================
 let adminSock = null;
-const activeBots = new Map(); // Menyimpan instance bot yang berjalan
-const pendingSetups = new Map(); // Menyimpan proses scan QR yang belum selesai
-const pendingApprovals = new Map(); // Menyimpan request menunggu persetujuan admin { messageId: botId }
-const duplicateCache = new Map(); // In-Memory Cache super cepat
+const activeBots = new Map(); 
+const pendingSetups = new Map(); 
+const pendingApprovals = new Map(); 
+const duplicateCache = new Map(); 
 
 // ================= IN-MEMORY ANTI DUPLIKAT =================
 function isDuplicate(link) {
@@ -51,7 +51,6 @@ async function processQueue() {
     while (secondaryQueue.length > 0) {
         const msg = secondaryQueue.shift();
         try {
-            // Gunakan bot admin atau bot pertama yang aktif untuk mem-forward ke secondary
             const forwarder = adminSock || activeBots.values().next().value?.sock;
             if (forwarder) await forwarder.sendMessage(SECONDARY_GROUP_ID, { text: msg });
         } catch (e) { console.error("Gagal forward ke secondary", e); }
@@ -72,7 +71,6 @@ function sendOnce(text, label) {
 
     const msg = `${key}\n\nTipe: ${label}`;
     
-    // Fast forward ke Primary menggunakan Admin bot atau bot yang tersedia
     const forwarder = adminSock || activeBots.values().next().value?.sock;
     if (forwarder) {
         forwarder.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => {});
@@ -82,10 +80,10 @@ function sendOnce(text, label) {
 
 // ================= WORKER BOT MANAGER =================
 async function startWorkerBot(botId) {
-    if (activeBots.has(botId)) return; // Cegah double start
+    if (activeBots.has(botId)) return;
 
     const folderName = `auth_info_bot${botId}`;
-    if (!fs.existsSync(folderName)) return; // Pastikan auth ada
+    if (!fs.existsSync(folderName)) return;
 
     const { state, saveCreds } = await useMultiFileAuthState(folderName);
     const { version } = await fetchLatestBaileysVersion();
@@ -93,7 +91,7 @@ async function startWorkerBot(botId) {
     const sock = makeWASocket({
         version,
         auth: state,
-        logger: pino({ level: 'silent' }), // Ganti ke 'silent' agar RDP tidak lag
+        logger: pino({ level: 'silent' }),
         browser: [`WaBot-${botId}`, 'Chrome', '1.0.0'],
         getMessage: async () => ({ conversation: '' }),
     });
@@ -116,7 +114,6 @@ async function startWorkerBot(botId) {
         }
     });
 
-    // Worker Bot Message Handler (Hanya deteksi link)
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
         if (type !== 'notify') return;
         const msg = messages[0];
@@ -132,14 +129,15 @@ async function startWorkerBot(botId) {
 
         const text = m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || '';
         
-        // Ekstrak URL Super Cepat
         const regex = /(?:https?:\/\/)?(?:[\w-]+\.)?(?:dana\.id|gopay\.co\.id|shopeepay\.co\.id)[^\s]*/gi;
         const matches = text.match(regex);
         if (matches) {
             matches.forEach(u => {
-                if (!u.includes('/minta') && !u.endsWith('dana.id') && !u.endsWith('dana.id/')) {
-                    sendOnce(u.startsWith('http') ? u : 'https://' + u, 'Link');
-                }
+                const uLower = u.toLowerCase();
+                if (uLower.includes('/minta') || uLower.endsWith('dana.id') || uLower.endsWith('dana.id/')) return;
+                if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) return;
+
+                sendOnce(u.startsWith('http') ? u : 'https://' + u, 'Link');
             });
         }
     });
@@ -167,7 +165,6 @@ async function startAdminBot() {
             }
         } else if (connection === 'open') {
             console.log('👑 SYSTEM CORE ADMIN READY!');
-            // Auto-start semua bot yang foldernya ada
             const dirs = fs.readdirSync(__dirname).filter(f => f.startsWith('auth_info_bot'));
             dirs.forEach(dir => startWorkerBot(dir.replace('auth_info_bot', '')));
         }
@@ -175,10 +172,12 @@ async function startAdminBot() {
 
     adminSock.ev.on('messages.upsert', async ({ messages }) => {
         const msg = messages[0];
-        if (!msg.message || msg.key.fromMe) return;
+        if (!msg.message) return; // Membuka akses agar Admin bisa balas dari HP sendiri
+
         const from = msg.key.remoteJid;
         const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
         const sender = msg.key.participant || msg.key.remoteJid;
+        const isFromMe = msg.key.fromMe;
 
         // 0. FITUR CEK ID GRUP (Berfungsi di grup mana saja)
         if (text === '!idgrup' && from.endsWith('@g.us')) {
@@ -187,53 +186,36 @@ async function startAdminBot() {
         }
 
         // ============================================================
-        // BATASAN ADMIN: Perintah di bawah ini HANYA jalan di Grup Admin
+        // BATASAN ADMIN: Perintah di bawah ini HANYA aktif di Grup Admin
         // ============================================================
         if (from !== ADMIN_GROUP_ID) return;
 
-        // 1. FITUR INFO PANDUAN PENGGUNAAN
-        if (text === '!info') {
-            const infoMsg = `*🤖 SISTEM MULTI-BOT TERINTEGRASI 🤖*
+        const actionText = text.trim().toUpperCase();
 
-Berikut adalah panduan penggunaan sistem bot:
-
-*👥 PERINTAH UMUM (Grup Mana Saja)*
-• *!idgrup* : Mengecek ID grup saat ini (berguna untuk config).
-
-*👑 PERINTAH ADMIN (Hanya Grup Admin)*
-• *!info* : Menampilkan menu panduan ini.
-• *!reqbot <id>* : Meminta penambahan bot baru (contoh: !reqbot 1). Menampilkan QR.
-• *!batal* : Membatalkan proses scan QR saat penambahan bot.
-• *!list* : Melihat daftar bot yang aktif beserta uptime (waktu aktif).
-• *!stop <id>* : Menghentikan jalannya bot spesifik (contoh: !stop 1).
-• *!start <id>* : Menjalankan kembali bot yang dihentikan (contoh: !start 1).
-• *!restart <id>* : Merestart bot tertentu (contoh: !restart 1).
-• *!restartall* : Merestart keseluruhan sistem core dan semua bot aktif.
-
-*✅ SISTEM PERSETUJUAN (Khusus Admin)*
-Ketika ada user scan QR bot baru, akan muncul pesan konfirmasi di grup ini:
-• Balas pesan bot dengan *OKE* atau *IYA* untuk menyetujui & menyalakan bot.
-• Balas pesan bot dengan *TIDAK* untuk menolak & menghapus akses bot tersebut.`;
-
-            await adminSock.sendMessage(from, { text: infoMsg }, { quoted: msg });
-            return;
-        }
-
-        // 2. SISTEM PERSETUJUAN ADMIN (Quote Reply)
+        // 1. SISTEM PERSETUJUAN ADMIN (Quote Reply)
         const contextInfo = msg.message.extendedTextMessage?.contextInfo;
         if (contextInfo?.stanzaId && pendingApprovals.has(contextInfo.stanzaId)) {
             const botId = pendingApprovals.get(contextInfo.stanzaId);
-            const action = text.trim().toLowerCase();
 
-            if (action === 'oke' || action === 'iya') {
+            if (actionText === 'OKE' || actionText === 'IYA') {
                 pendingApprovals.delete(contextInfo.stanzaId);
                 await adminSock.sendMessage(from, { text: `✅ Permintaan disetujui. Bot *${botId}* sedang dijalankan...` });
                 startWorkerBot(botId);
-            } else if (action === 'tidak') {
+            } else if (actionText === 'TIDAK') {
                 pendingApprovals.delete(contextInfo.stanzaId);
                 fs.rmSync(`auth_info_bot${botId}`, { recursive: true, force: true });
                 await adminSock.sendMessage(from, { text: `❌ Permintaan ditolak. Sesi Bot *${botId}* dihapus.` });
             }
+            return;
+        }
+
+        // Filter: Cegah bot merespon obrolan biasa dirinya sendiri (kecuali perintah berawalan !)
+        if (isFromMe && !text.startsWith('!')) return;
+
+        // 2. FITUR INFO PANDUAN PENGGUNAAN
+        if (text === '!info') {
+            const infoMsg = `*🤖 SISTEM MULTI-BOT TERINTEGRASI 🤖*\n\n*👑 PERINTAH ADMIN*\n• *!info* : Menampilkan menu ini.\n• *!reqbot <id>* : Meminta penambahan bot baru.\n• *!batal* : Membatalkan proses scan.\n• *!list* : Melihat bot yang aktif.\n• *!stop <id>* : Menghentikan bot.\n• *!start <id>* : Menjalankan kembali bot.\n• *!restart <id>* : Merestart bot.\n• *!restartall* : Merestart keseluruhan sistem.`;
+            await adminSock.sendMessage(from, { text: infoMsg }, { quoted: msg });
             return;
         }
 
@@ -244,13 +226,16 @@ Ketika ada user scan QR bot baru, akan muncul pesan konfirmasi di grup ini:
             
             const folderName = `auth_info_bot${botId}`;
             if (activeBots.has(botId) || fs.existsSync(folderName)) {
-                return adminSock.sendMessage(from, { text: `⚠️ Bot ID ${botId} sudah ada/aktif. Gunakan ID lain atau ketik !list.` });
+                return adminSock.sendMessage(from, { text: `⚠️ Bot ID ${botId} sudah ada/aktif.` });
             }
 
-            await adminSock.sendMessage(from, { text: `⏳ Generate QR untuk Bot ${botId}...\n(Mengambil koneksi ke server WA...)` });
+            await adminSock.sendMessage(from, { text: `⏳ Generate QR untuk Bot ${botId}...` });
             
-            // Bungkus dalam fungsi agar bisa AUTO-RECONNECT saat Error 515
+            let isSetupFinished = false;
+
             async function connectSetup() {
+                if (isSetupFinished) return;
+
                 const { version } = await fetchLatestBaileysVersion(); 
                 const { state: tempState, saveCreds: tempSaveCreds } = await useMultiFileAuthState(folderName);
                 
@@ -264,7 +249,6 @@ Ketika ada user scan QR bot baru, akan muncul pesan konfirmasi di grup ini:
                 });
                 
                 tempSock.ev.on('creds.update', tempSaveCreds);
-
                 pendingSetups.set(sender, { sock: tempSock, botId });
 
                 tempSock.ev.on('connection.update', async (update) => {
@@ -275,37 +259,35 @@ Ketika ada user scan QR bot baru, akan muncul pesan konfirmasi di grup ini:
                             const qrBuffer = await qrcode.toBuffer(qr, { scale: 6 });
                             await adminSock.sendMessage(from, { 
                                 image: qrBuffer, 
-                                caption: `✅ *QR Login untuk Bot ${botId}*\n\nSilakan scan QR ini. (QR otomatis berganti jika expired).\nKetik *!batal* jika ingin menggagalkan.` 
+                                caption: `✅ *QR Login Bot ${botId}*\n\nSilakan scan QR ini. Ketik *!batal* jika ingin membatalkan.` 
                             });
                         } catch (err) {}
                     }
                     
                     if (connection === 'close') {
-                        const statusCode = lastDisconnect?.error?.output?.statusCode;
-                        console.log(`[Setup-${botId}] Koneksi QR terputus. Error code:`, statusCode);
+                        if (isSetupFinished) return;
                         
+                        const statusCode = lastDisconnect?.error?.output?.statusCode;
                         if (statusCode !== DisconnectReason.loggedOut) {
-                            // JIKA ERROR 515 / 405, RECONNECT OTOMATIS
-                            console.log(`[Setup-${botId}] Mencoba menyambung kembali (Auto-Reconnect)...`);
                             setTimeout(connectSetup, 2000); 
                         } else {
-                            // Jika dilogout / ditolak dari HP
                             pendingSetups.delete(sender);
                             if (fs.existsSync(folderName)) fs.rmSync(folderName, { recursive: true, force: true });
-                            await adminSock.sendMessage(from, { text: `❌ Setup Bot ${botId} dibatalkan atau ditolak perangkat.` });
+                            await adminSock.sendMessage(from, { text: `❌ Setup Bot dibatalkan.` });
                         }
                     }
                     
                     if (connection === 'open') {
-                        console.log(`[Setup-${botId}] Sesi berhasil tersimpan!`);
+                        isSetupFinished = true;
+                        try { 
+                            tempSock.ev.removeAllListeners();
+                            tempSock.ws.close(); 
+                        } catch (e) {} 
                         
-                        // Tutup koneksi setup dengan aman karena sudah berhasil
-                        try { tempSock.ws.close(); } catch (e) {} 
                         pendingSetups.delete(sender);
                         
-                        // Kirim pesan minta persetujuan admin
                         const askMsg = await adminSock.sendMessage(from, { 
-                            text: `🔔 *PERMOHONAN BOT BARU*\n\nUser: @${sender.split('@')[0]}\nBot ID: *${botId}*\nStatus: ✅ *QR Berhasil di-scan & login!*\n\n👉 *Admin*: Balas (Quote/Reply) pesan ini dengan *OKE* untuk menyalakan atau *TIDAK* untuk menolak.`,
+                            text: `🔔 *PERMOHONAN BOT BARU*\n\nUser: @${sender.split('@')[0]}\nBot ID: *${botId}*\n\n👉 Balas (Quote) pesan ini dengan *OKE* untuk menyalakan atau *TIDAK* untuk menolak.`,
                             mentions: [sender]
                         });
                         pendingApprovals.set(askMsg.key.id, botId);
@@ -313,7 +295,6 @@ Ketika ada user scan QR bot baru, akan muncul pesan konfirmasi di grup ini:
                 });
             }
 
-            // Jalankan fungsi setup
             connectSetup();
             return;
         }
@@ -325,7 +306,7 @@ Ketika ada user scan QR bot baru, akan muncul pesan konfirmasi di grup ini:
                 setup.sock.ws.close();
                 fs.rmSync(`auth_info_bot${setup.botId}`, { recursive: true, force: true });
                 pendingSetups.delete(sender);
-                await adminSock.sendMessage(from, { text: '❌ Proses dibatalkan oleh user.' });
+                await adminSock.sendMessage(from, { text: '❌ Proses dibatalkan.' });
             }
         }
 
@@ -345,8 +326,6 @@ Ketika ada user scan QR bot baru, akan muncul pesan konfirmasi di grup ini:
                 activeBots.get(id).sock.ws.close();
                 activeBots.delete(id);
                 await adminSock.sendMessage(from, { text: `🛑 Bot ${id} dihentikan.` });
-            } else {
-                await adminSock.sendMessage(from, { text: `⚠️ Bot ${id} tidak sedang aktif.` });
             }
         }
 
@@ -369,14 +348,33 @@ Ketika ada user scan QR bot baru, akan muncul pesan konfirmasi di grup ini:
         }
         
         if (text === '!restartall') {
-            await adminSock.sendMessage(from, { text: `🔄 Merestart semua bot & Core System...` });
-            process.exit(0); // PM2 akan otomatis menghidupkan ulang keseluruhan sistem
+            await adminSock.sendMessage(from, { text: `🔄 Merestart semua sistem...` });
+            process.exit(0); 
         }
     });
 }
 
 startAdminBot();
 
+// ================= JADWAL OTOMATIS =================
+setInterval(() => {
+    const now = new Date();
+    const options = { timeZone: 'Asia/Jakarta', hour12: false, hour: '2-digit', minute: '2-digit' };
+    const timeString = now.toLocaleTimeString('en-US', options);
+
+    if (timeString === '04:50') {
+        console.log('⏰ Menghentikan sesi bot (Jadwal Harian OFF)...');
+        for (let [id, data] of activeBots.entries()) {
+            try { data.sock.ws.close(); } catch (e) {}
+            activeBots.delete(id);
+        }
+    } else if (timeString === '06:00') {
+        console.log('⏰ Menjalankan ulang sesi bot (Jadwal Harian ON)...');
+        const dirs = fs.readdirSync(__dirname).filter(f => f.startsWith('auth_info_bot'));
+        dirs.forEach(dir => startWorkerBot(dir.replace('auth_info_bot', '')));
+    }
+}, 60000);
+
 // Prevent Crash
-process.on('unhandledRejection', (err) => console.log('Unhandled Rejection:', err));
-process.on('uncaughtException', (err) => console.log('Uncaught Exception:', err));
+process.on('unhandledRejection', (err) => {});
+process.on('uncaughtException', (err) => {});
