@@ -54,38 +54,30 @@ async function downloadMedia(mediaMsg, type) {
 }
 
 async function detectQR(buffer) {
-    console.log(`\n[DEBUG-QR] Memulai proses deteksi QR. Ukuran file: ${buffer.length} bytes`);
     try {
         const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
         const meta = await baseImg.metadata();
-        console.log(`[DEBUG-QR] Info Gambar Mentah: Resolusi ${meta.width}x${meta.height}, Format ${meta.format}`);
 
-        const decodeBuffer = async (imgBuf, methodId) => {
+        const decodeBuffer = async (imgBuf) => {
             const image = await Jimp.read(imgBuf);
             return new Promise((resolve, reject) => {
                 const qr = new QrCode();
-                qr.callback = (e, v) => (e || !v) ? reject(e) : resolve({ result: v.result, methodId });
+                qr.callback = (e, v) => (e || !v) ? reject(e) : resolve(v.result);
                 qr.decode(image.bitmap);
             });
         };
 
-        const cw1 = Math.floor(meta.width * 0.7); const ch1 = Math.floor(meta.height * 0.6);
-        const cw2 = Math.floor(meta.width * 0.45); const ch2 = Math.floor(meta.height * 0.4);
-
+        // KUNCI PERBAIKAN: Tidak ada lagi fitur crop gambar. 
+        // Lakukan scan penuh dengan variasi warna & resize agar QR di pojok tetap terbaca.
         const buffers = await Promise.all([
             baseImg.clone().png().toBuffer(),
-            baseImg.clone().greyscale().linear(1.5, -50).png().toBuffer(),
-            baseImg.clone().extract({ left: Math.floor((meta.width - cw1) / 2), top: Math.floor((meta.height - ch1) / 2), width: cw1, height: ch1 }).resize(cw1 * 2).greyscale().threshold(140).png().toBuffer(),
-            baseImg.clone().extract({ left: Math.floor((meta.width - cw2) / 2), top: Math.floor((meta.height - ch2) / 2), width: cw2, height: ch2 }).resize(cw2 * 3).greyscale().linear(2, -100).png().toBuffer()
+            baseImg.clone().normalize().greyscale().png().toBuffer(),
+            baseImg.clone().resize({ width: 800 }).normalize().png().toBuffer(), 
+            baseImg.clone().resize({ width: 1600 }).greyscale().threshold(140).png().toBuffer()
         ]);
 
-        console.log(`[DEBUG-QR] Menjalankan 4 variasi filter kontras ke library scanner...`);
-        const resultObj = await Promise.any(buffers.map((buf, index) => decodeBuffer(buf, index + 1)));
-        
-        console.log(`[DEBUG-QR] ✅ SUKSES! QR terbaca oleh Filter #${resultObj.methodId}. Hasil Teks Mentah:`, resultObj.result);
-        return resultObj.result;
-    } catch (err) {
-        console.log(`[DEBUG-QR] ❌ GAGAL. Semua 4 metode filter tidak menemukan pola QR valid. (Bisa jadi gambar buram/terpotong)`);
+        return await Promise.any(buffers.map(buf => decodeBuffer(buf)));
+    } catch {
         return null;
     }
 }
@@ -105,32 +97,21 @@ function isDuplicate(link) {
 function processExtractedLink(sock, textRaw, label) {
     if (!textRaw) return;
     
-    console.log(`\n[DEBUG-FILTER] Menerima input dari (${label}): ${textRaw}`);
     const regex = /(?:https?:\/\/)?(?:[\w-]+\.)?(?:dana\.id|gopay\.co\.id|shopeepay\.co\.id)[^\s]*/gi;
     const matches = textRaw.match(regex);
     
     if (matches) {
-        console.log(`[DEBUG-FILTER] Ditemukan ${matches.length} link cocok dengan Regex:`, matches);
         matches.forEach(url => {
             const uLower = url.toLowerCase();
             
-            if (uLower.includes('/minta') || uLower.endsWith('dana.id') || uLower.endsWith('dana.id/')) {
-                console.log(`[DEBUG-FILTER] ⛔ DIBLOKIR: Terdeteksi URL minta dana atau dana beranda -> ${url}`);
-                return;
-            }
-            if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) {
-                console.log(`[DEBUG-FILTER] ⛔ DIBLOKIR: Link DANA tapi BUKAN kaget -> ${url}`);
-                return;
-            }
+            if (uLower.includes('/minta') || uLower.endsWith('dana.id') || uLower.endsWith('dana.id/')) return;
+            if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) return;
 
             const finalUrl = url.startsWith('http') ? url : 'https://' + url;
             
-            if (isDuplicate(finalUrl)) {
-                console.log(`[DEBUG-FILTER] ♻️ DUPLIKAT: Link sudah dikirim dalam 5 menit terakhir -> ${finalUrl}`);
-                return;
-            }
+            if (isDuplicate(finalUrl)) return; // Abaikan jika duplikat
 
-            console.log(`[DEBUG-FILTER] 🚀 VALID & LOLOS! Mengirim link ke grup... -> ${finalUrl}`);
+            console.log(`\n🚀 [BERHASIL!] Menemukan dan meneruskan: ${finalUrl} (Dari ${label})`);
             const msg = `${finalUrl}\n\nTipe: ${label}`;
             
             if (sock) {
@@ -142,8 +123,6 @@ function processExtractedLink(sock, textRaw, label) {
                 }
             }
         });
-    } else {
-        console.log(`[DEBUG-FILTER] ❌ Tidak ditemukan link DANA/Gopay/Shopee dalam teks.`);
     }
 }
 
@@ -218,15 +197,13 @@ async function startWorkerBot(botId) {
             const mediaMsg = imageMsg || stickerMsg;
             const typeMedia = imageMsg ? 'image' : 'sticker';
             
-            console.log(`\n[DEBUG-SYS] Terdeteksi media masuk jenis: ${typeMedia.toUpperCase()}`);
             downloadMedia(mediaMsg, typeMedia).then(buffer => {
-                console.log(`[DEBUG-SYS] Download media selesai.`);
                 detectQR(buffer).then(qrData => {
                     if (qrData) {
                         processExtractedLink(sock, qrData, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker');
                     }
-                }).catch(e => console.log(`[DEBUG-SYS] Error saat menjalankan detectQR:`, e));
-            }).catch(e => console.log(`[DEBUG-SYS] Error gagal mendownload media:`, e));
+                }).catch(() => {});
+            }).catch(() => {});
         }
     });
 }
