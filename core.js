@@ -56,72 +56,73 @@ async function downloadMedia(mediaMsg, type) {
 async function detectQR(buffer) {
     try {
         console.log(`\n[DEBUG-QR] Memulai scan media...`);
+        
+        // 1. WAJIB: Beri background putih untuk stiker yang transparan
         const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
         const meta = await baseImg.metadata();
-        const w = meta.width;
-        const h = meta.height;
+        let w = meta.width;
+        let h = meta.height;
 
         if (!w || !h) return null;
 
-        // 1. AUTO-UPSCALE: Perbesar stiker kecil agar QR renggang dan mudah discan
+        // 2. AUTO-UPSCALE: Perbesar gambar kecil (seperti stiker) agar titik QR renggang
         const scale = Math.max(1, 1000 / Math.max(w, h));
         const newW = Math.floor(w * scale);
         const newH = Math.floor(h * scale);
-        
         const upscaledImg = baseImg.resize(newW, newH);
 
-        // 2. PEMOTONGAN AREA CERDAS (SMART CROP)
+        // 3. POTONG AREA FOKUS
         let crops = [
             { name: 'Full Layar', img: upscaledImg.clone() }
         ];
-
-        // Crop Khusus Stiker "Cepat!!!": Buang 20% teks atas dan 20% kartun bawah
-        const cropH = Math.floor(newH * 0.6);
-        const cropY = Math.floor((newH - cropH) / 2);
-        crops.push({
-            name: 'Fokus Area Tengah',
-            img: upscaledImg.clone().extract({ left: 0, top: cropY, width: newW, height: cropH })
-        });
-
-        // Crop Presisi untuk Screenshot DANA asli
+        
         const minDim = Math.min(newW, newH);
         const size = Math.floor(minDim * 0.85);
+        
+        // Potong Khusus Tengah (Untuk Screenshot DANA Ori)
         crops.push({
-            name: 'Fokus Kotak QR',
-            img: upscaledImg.clone().extract({ left: Math.floor((newW - size) / 2), top: Math.floor((newH - size) / 2), width: size, height: size })
+            name: 'Fokus Tengah',
+            img: upscaledImg.clone().extract({ left: Math.floor((newW - size)/2), top: Math.floor((newH - size)/2), width: size, height: size })
+        });
+        
+        // Potong Khusus Atas (Untuk Stiker "Cepat!!!")
+        crops.push({
+            name: 'Fokus Atas',
+            img: upscaledImg.clone().extract({ left: 0, top: 0, width: newW, height: Math.floor(newH * 0.7) })
         });
 
+        // 4. PROSES SCAN
         for (let i = 0; i < crops.length; i++) {
-            const imgObj = crops[i].img;
-
-            // 3. VARIASI FILTER KONTRAS
+            const imgObj = crops[i].img.resize(800, 800, { fit: 'inside', withoutEnlargement: true });
+            
             const filters = [
                 { name: 'Normal', img: imgObj.clone() },
                 { name: 'Hitam Putih', img: imgObj.clone().normalize().greyscale() },
-                { name: 'Kontras Tajam', img: imgObj.clone().greyscale().linear(1.5, -50) },
-                { name: 'Threshold Ekstrem', img: imgObj.clone().greyscale().threshold(140) }
+                { name: 'Threshold', img: imgObj.clone().greyscale().threshold(140) }
             ];
 
             for (let j = 0; j < filters.length; j++) {
                 try {
-                    // Ekstrak buffer sebagai PNG agar Jimp membacanya sempurna (Solusi Malformed Data Error)
-                    const pngBuffer = await filters[j].img.png().toBuffer();
-                    const image = await Jimp.read(pngBuffer);
+                    // KUNCI UTAMA: .ensureAlpha() harus di akhir agar output PASTI 4 Channel (RGBA)
+                    const { data, info } = await filters[j].img
+                        .ensureAlpha()
+                        .raw()
+                        .toBuffer({ resolveWithObject: true });
                     
-                    const decoded = jsQR(image.bitmap.data, image.bitmap.width, image.bitmap.height);
+                    const clampedArray = new Uint8ClampedArray(data);
+                    const decoded = jsQR(clampedArray, info.width, info.height);
                     
                     if (decoded && decoded.data) {
                         console.log(`[DEBUG-QR] ✅ QR Terbaca! (Metode: ${crops[i].name} - ${filters[j].name}) ->`, decoded.data);
                         return decoded.data;
                     }
                 } catch (err) {
-                    // Lanjut ke filter berikutnya jika filter ini gagal diproses
-                    continue;
+                    continue; // Jika filter ini gagal diproses, lanjut ke filter berikutnya
                 }
             }
         }
         
-        console.log(`[DEBUG-QR] ❌ GAGAL. QR tidak ditemukan (Mungkin gambar miring / logo menutupi pola).`);
+        console.log(`[DEBUG-QR] ❌ GAGAL. QR tidak ditemukan di media ini.`);
         return null;
     } catch (e) {
         console.log(`[DEBUG-QR] ❌ Error sistem saat scan:`, e.message);
