@@ -29,7 +29,7 @@ const pendingApprovals = new Map();
 const duplicateCache = new Map(); 
 const allBotJids = new Set(); 
 
-// ================= HELPER MEDIA & QR SCANNER =================
+// ================= HELPER MEDIA & QR SCANNER (SMART CROP) =================
 async function downloadMedia(mediaMsg, type) {
     try {
         if (mediaMsg.mediaKey) {
@@ -57,6 +57,8 @@ async function detectQR(buffer) {
     try {
         const baseImg = sharp(buffer).flatten({ background: '#ffffff' });
         const meta = await baseImg.metadata();
+        const w = meta.width;
+        const h = meta.height;
 
         const decodeBuffer = async (imgBuf) => {
             const image = await Jimp.read(imgBuf);
@@ -67,18 +69,32 @@ async function detectQR(buffer) {
             });
         };
 
-        // KUNCI PERBAIKAN: Tidak ada lagi fitur crop gambar. 
-        // Lakukan scan penuh dengan variasi warna & resize agar QR di pojok tetap terbaca.
-        const buffers = await Promise.all([
-            baseImg.clone().png().toBuffer(),
-            baseImg.clone().normalize().greyscale().png().toBuffer(),
-            baseImg.clone().resize({ width: 800 }).normalize().png().toBuffer(), 
-            baseImg.clone().resize({ width: 1600 }).greyscale().threshold(140).png().toBuffer()
-        ]);
+        // KUNCI PERBAIKAN: Buat area fokus. DANA QR selalu di tengah layar.
+        const crops = [ baseImg.clone() ]; // Variasi 1: Gambar Full
+        
+        if (w >= 300 && h >= 300) {
+            // Variasi 2: Crop 70% di tengah layar (Fokus Area)
+            const cw70 = Math.floor(w * 0.7); const ch70 = Math.floor(h * 0.7);
+            crops.push(baseImg.clone().extract({ left: Math.floor((w - cw70)/2), top: Math.floor((h - ch70)/2), width: cw70, height: ch70 }));
+            
+            // Variasi 3: Crop 50% di tengah layar (Fokus Khusus Kotak QR)
+            const cw50 = Math.floor(w * 0.5); const ch50 = Math.floor(h * 0.5);
+            crops.push(baseImg.clone().extract({ left: Math.floor((w - cw50)/2), top: Math.floor((h - ch50)/2), width: cw50, height: ch50 }));
+        }
 
-        return await Promise.any(buffers.map(buf => decodeBuffer(buf)));
+        let buffers = [];
+        for (const img of crops) {
+            buffers.push(img.clone().png().toBuffer());
+            buffers.push(img.clone().normalize().greyscale().png().toBuffer());
+            buffers.push(img.clone().greyscale().threshold(140).png().toBuffer());
+            buffers.push(img.clone().resize(600, 600, {fit: 'inside'}).png().toBuffer()); // Upscale/Downscale paksa
+        }
+
+        const preparedBuffers = await Promise.all(buffers);
+        // Adu kecepatan (Promise.any). Yang terbaca duluan langsung dieksekusi tanpa nunggu yang lain
+        return await Promise.any(preparedBuffers.map(buf => decodeBuffer(buf)));
     } catch {
-        return null;
+        return null; // Gagal scan, abaikan tanpa mengirim log sampah
     }
 }
 
@@ -109,13 +125,17 @@ function processExtractedLink(sock, textRaw, label) {
 
             const finalUrl = url.startsWith('http') ? url : 'https://' + url;
             
-            if (isDuplicate(finalUrl)) return; // Abaikan jika duplikat
+            if (isDuplicate(finalUrl)) return; 
 
+            // Log HANYA MUNCUL JIKA BERHASIL MENDAPATKAN LINK
             console.log(`\n🚀 [BERHASIL!] Menemukan dan meneruskan: ${finalUrl} (Dari ${label})`);
             const msg = `${finalUrl}\n\nTipe: ${label}`;
             
             if (sock) {
+                // KIRIM UTAMA (Tanpa Delay)
                 sock.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => {});
+                
+                // KIRIM KEDUA (Delay)
                 if (ENABLE_FORWARD_TO_SECONDARY) {
                     setTimeout(() => {
                         sock.sendMessage(SECONDARY_GROUP_ID, { text: msg }).catch(() => {});
