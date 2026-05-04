@@ -139,94 +139,54 @@ async function downloadMedia(mediaMsg, type) {
 
 async function detectQR(buffer) {
     try {
-        const base = sharp(buffer).flatten({ background: '#ffffff' });
-        const meta = await base.metadata();
-        if (!meta.width || !meta.height) return null;
+        console.log(`\n[DEBUG-QR] Memulai scan media...`);
+        const baseImg = sharp(buffer);
+        const meta = await baseImg.metadata();
+        const w = meta.width;
+        const h = meta.height;
 
-        let w = meta.width;
-        let h = meta.height;
+        if (!w || !h) return null;
 
-        // 🔥 padding besar (quiet zone penting)
-        const padded = base.extend({
-            top: 80, bottom: 80, left: 80, right: 80,
-            background: '#ffffff'
-        });
+        // KUNCI: Potong gambar menjadi beberapa area agar fokus ke QR
+        let crops = [ baseImg.clone() ]; // 1. Scan Full Layar
+        
+        if (w >= 300 && h >= 300) {
+            const size = Math.floor(Math.min(w, h) * 0.9);
+            // 2. Scan Khusus Tengah (Bagus untuk Screenshot DANA)
+            crops.push(baseImg.clone().extract({ left: Math.floor((w - size)/2), top: Math.floor((h - size)/2), width: size, height: size })); 
+            // 3. Scan Khusus Atas (Bagus untuk Stiker)
+            crops.push(baseImg.clone().extract({ left: 0, top: 0, width: w, height: Math.floor(h * 0.7) })); 
+        }
 
-        w += 160;
-        h += 160;
+        for (let i = 0; i < crops.length; i++) {
+            // Resize gambar max 800px dan paksa format warna menjadi RGBA (Syarat mutlak jsQR)
+            const imgObj = crops[i].resize(800, 800, { fit: 'inside', withoutEnlargement: true }).ensureAlpha();
+            
+            // Variasi Kontras Warna untuk menebus gambar buram
+            const filters = [
+                imgObj.clone(), // Normal
+                imgObj.clone().normalize().greyscale(), // Hitam Putih Tajam
+                imgObj.clone().greyscale().linear(1.5, -50) // Gelap Terang
+            ];
 
-        // 🔥 upscale agresif (kunci stiker kecil)
-        const scale = Math.max(2, 1400 / Math.max(w, h));
-        const W = Math.floor(w * scale);
-        const H = Math.floor(h * scale);
-
-        const img = padded.resize(W, H, {
-            kernel: sharp.kernel.nearest
-        });
-
-        // 🔥 multi crop (prioritas stiker)
-        const crops = [
-            // atas (stiker biasanya di sini)
-            img.clone().extract({ left: 0, top: 0, width: W, height: Math.floor(H * 0.65) }),
-
-            // tengah
-            img.clone().extract({
-                left: Math.floor(W * 0.1),
-                top: Math.floor(H * 0.1),
-                width: Math.floor(W * 0.8),
-                height: Math.floor(H * 0.8)
-            }),
-
-            // full
-            img.clone()
-        ];
-
-        // 🔥 multi angle (QR sering miring)
-        const angles = [0, 90, 180, 270];
-
-        for (let c = 0; c < crops.length; c++) {
-            for (let a = 0; a < angles.length; a++) {
-
-                const rotated = crops[c].clone().rotate(angles[a]);
-
-                const resized = rotated.resize(900, 900, {
-                    fit: 'inside',
-                    withoutEnlargement: true
-                });
-
-                // 🔥 multi filter (kontras ekstrim)
-                const filters = [
-                    resized.clone(),
-                    resized.clone().greyscale(),
-                    resized.clone().normalize(),
-                    resized.clone().greyscale().threshold(120),
-                    resized.clone().greyscale().threshold(160),
-                    resized.clone().modulate({ brightness: 1.2, saturation: 0 }),
-                ];
-
-                for (let f = 0; f < filters.length; f++) {
-                    try {
-                        const { data, info } = await filters[f]
-                            .ensureAlpha()
-                            .raw()
-                            .toBuffer({ resolveWithObject: true });
-
-                        const code = jsQR(
-                            new Uint8ClampedArray(data),
-                            info.width,
-                            info.height
-                        );
-
-                        if (code && code.data) {
-                            return code.data;
-                        }
-                    } catch (e) {}
+            for (let j = 0; j < filters.length; j++) {
+                // Ekstrak pixel mentah (Jauh lebih cepat dari Jimp)
+                const { data, info } = await filters[j].raw().toBuffer({ resolveWithObject: true });
+                const clampedArray = new Uint8ClampedArray(data);
+                
+                // Tembak menggunakan jsQR
+                const decoded = jsQR(clampedArray, info.width, info.height);
+                
+                if (decoded && decoded.data) {
+                    console.log(`[DEBUG-QR] ✅ QR Terbaca! ->`, decoded.data);
+                    return decoded.data;
                 }
             }
         }
-
+        console.log(`[DEBUG-QR] ❌ GAGAL. QR tidak ditemukan di media ini.`);
         return null;
     } catch (e) {
+        console.log(`[DEBUG-QR] ❌ Error saat scan:`, e.message);
         return null;
     }
 }
