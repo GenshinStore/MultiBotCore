@@ -13,7 +13,7 @@ const crypto = require('crypto');
 require('events').EventEmitter.defaultMaxListeners = 0;
 
 // ================= CONFIGURATION =================
-const ADMIN_GROUP_ID = 'ID_GRUP_ADMIN@g.us'; // GANTI DENGAN ID GRUP ADMIN
+const ADMIN_GROUP_ID = '120363426375691762@g.us'; // GANTI DENGAN ID GRUP ADMIN
 const PRIMARY_GROUP_ID = '120363408426078537@g.us';
 const SECONDARY_GROUP_ID = '120363426296094605@g.us';
 
