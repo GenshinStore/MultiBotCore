@@ -1,28 +1,20 @@
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason, downloadContentFromMessage } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, DisconnectReason } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const qrcode = require('qrcode');
 const qrcodeTerminal = require('qrcode-terminal');
-const Jimp = require('jimp');
-const QrCode = require('qrcode-reader');
-const sharp = require('sharp');
 const fs = require('fs');
-const path = require('path');
-const https = require('https');
 const crypto = require('crypto');
 
 require('events').EventEmitter.defaultMaxListeners = 0;
 
 // ================= CONFIGURATION =================
-const ADMIN_GROUP_ID = '120363409663500630@g.us'; // ID Grup Admin Anda
-// const ADMIN_GROUP_ID = '120363426375691762@g.us'; // ID Grup Admin Anda
+const ADMIN_GROUP_ID = '120363426375691762@g.us'; 
 const PRIMARY_GROUP_ID = '120363408426078537@g.us';
 const SECONDARY_GROUP_ID = '120363426296094605@g.us';
 
 const ENABLE_FORWARD_TO_SECONDARY = true;
-const DELAY_MS = 1000;
-const CACHE_TTL_MS = 5 * 60 * 1000; // 5 Menit
-
-const VALID_DOMAINS = /(dana\.id|gopay\.co\.id|shopeepay\.co\.id)/i;
+const DELAY_SECONDARY_MS = 60000; // ⏱️ Atur Delay Grup Kedua di sini (60000 = 60 detik / 1 menit)
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 Menit Anti-Duplikat
 
 // ================= GLOBAL STATE (SHARED MEMORY) =================
 let adminSock = null;
@@ -30,52 +22,37 @@ const activeBots = new Map();
 const pendingSetups = new Map(); 
 const pendingApprovals = new Map(); 
 const duplicateCache = new Map(); 
+const allBotJids = new Set(); // Mencegah bot membaca pesan dari sesama bot kita
 
 // ================= IN-MEMORY ANTI DUPLIKAT =================
 function isDuplicate(link) {
-    const hash = crypto.createHash('md5').update(link).digest('hex');
-    if (duplicateCache.has(hash)) return true;
+    let cleanLink = link.trim().replace(/\/$/, ''); 
+    const hash = crypto.createHash('md5').update(cleanLink).digest('hex');
+    
+    if (duplicateCache.has(hash)) return true; 
     
     duplicateCache.set(hash, Date.now());
     setTimeout(() => duplicateCache.delete(hash), CACHE_TTL_MS);
     return false;
 }
 
-// ================= SECONDARY SMART QUEUE =================
-const secondaryQueue = [];
-let isProcessingQueue = false;
-
-async function processQueue() {
-    if (isProcessingQueue) return;
-    isProcessingQueue = true;
-
-    while (secondaryQueue.length > 0) {
-        // Ambil socket pengirim asli beserta pesannya
-        const { sock, text } = secondaryQueue.shift();
-        try {
-            if (sock) await sock.sendMessage(SECONDARY_GROUP_ID, { text });
-        } catch (e) { console.error("Gagal forward ke secondary", e); }
-        await new Promise(res => setTimeout(res, DELAY_MS));
-    }
-    isProcessingQueue = false;
-}
-
-function sendToSecondary(sock, msg) {
-    if (secondaryQueue.length >= 100) secondaryQueue.shift();
-    secondaryQueue.push({ sock, text: msg }); // Simpan socket bot yang mendeteksi
-    processQueue();
-}
-
+// ================= FAST SENDING (VIP & REGULER) =================
 function sendOnce(sock, text, label) {
-    const key = text.trim();
-    if (isDuplicate(key)) return;
+    let cleanLink = text.trim().replace(/\/$/, ''); 
+    if (isDuplicate(cleanLink)) return;
 
-    const msg = `${key}\n\nTipe: ${label}`;
+    const msg = `${cleanLink}\n\nTipe: ${label}`;
     
-    // Gunakan socket dari bot penemu, BUKAN adminSock
     if (sock) {
+        // 🚀 GRUP UTAMA (VIP): Tembak instan tanpa delay 0 detik!
         sock.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => {});
-        if (ENABLE_FORWARD_TO_SECONDARY) sendToSecondary(sock, msg);
+
+        // ⏱️ GRUP KEDUA (Reguler): Tahan dulu pesan ini sesuai DELAY_SECONDARY_MS
+        if (ENABLE_FORWARD_TO_SECONDARY) {
+            setTimeout(() => {
+                sock.sendMessage(SECONDARY_GROUP_ID, { text: msg }).catch(() => {});
+            }, DELAY_SECONDARY_MS);
+        }
     }
 }
 
@@ -92,7 +69,7 @@ async function startWorkerBot(botId) {
     const sock = makeWASocket({
         version,
         auth: state,
-        logger: pino({ level: 'silent' }),
+        logger: pino({ level: 'silent' }), 
         browser: [`WaBot-${botId}`, 'Chrome', '1.0.0'],
         getMessage: async () => ({ conversation: '' }),
     });
@@ -100,6 +77,7 @@ async function startWorkerBot(botId) {
     sock.ev.on('creds.update', saveCreds);
     sock.ev.on('connection.update', (update) => {
         const { connection, lastDisconnect } = update;
+        
         if (connection === 'close') {
             const reason = lastDisconnect?.error?.output?.statusCode;
             activeBots.delete(botId);
@@ -110,7 +88,11 @@ async function startWorkerBot(botId) {
                 console.log(`[Bot ${botId}] Sesi habis/dihapus.`);
             }
         } else if (connection === 'open') {
-            console.log(`[Bot ${botId}] 🟢 READY & TERINTEGRASI`);
+            // Daftarkan identitas bot ini ke Whitelist
+            const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+            allBotJids.add(myJid); 
+            
+            console.log(`[Bot ${botId}] 🟢 READY (${myJid})`);
             activeBots.set(botId, { sock, startTime: Date.now() });
         }
     });
@@ -122,6 +104,12 @@ async function startWorkerBot(botId) {
 
         const from = msg.key.remoteJid;
         if (from === ADMIN_GROUP_ID || from === PRIMARY_GROUP_ID || from === SECONDARY_GROUP_ID) return;
+
+        const senderRaw = msg.key.participant || msg.key.remoteJid;
+        const senderJid = senderRaw ? senderRaw.split(':')[0] + '@s.whatsapp.net' : '';
+
+        // 🛑 ANTI-TABRAKAN BOT: Jangan baca pesan yang dikirim oleh bot lain di sistem ini
+        if (allBotJids.has(senderJid)) return;
 
         let m = msg.message;
         if (m.ephemeralMessage) m = m.ephemeralMessage.message;
@@ -138,7 +126,6 @@ async function startWorkerBot(botId) {
                 if (uLower.includes('/minta') || uLower.endsWith('dana.id') || uLower.endsWith('dana.id/')) return;
                 if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) return;
 
-                // Lempar variabel "sock" dari bot ini ke fungsi sendOnce
                 sendOnce(sock, u.startsWith('http') ? u : 'https://' + u, 'Link');
             });
         }
@@ -158,6 +145,7 @@ async function startAdminBot() {
     adminSock.ev.on('connection.update', (update) => {
         const { connection, qr, lastDisconnect } = update;
         if (qr) qrcodeTerminal.generate(qr, { small: true });
+        
         if (connection === 'close') {
             if (lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut) {
                 setTimeout(startAdminBot, 3000);
@@ -166,6 +154,9 @@ async function startAdminBot() {
                 process.exit(1);
             }
         } else if (connection === 'open') {
+            const myJid = adminSock.user.id.split(':')[0] + '@s.whatsapp.net';
+            allBotJids.add(myJid); 
+
             console.log('👑 SYSTEM CORE ADMIN READY!');
             const dirs = fs.readdirSync(__dirname).filter(f => f.startsWith('auth_info_bot'));
             dirs.forEach(dir => startWorkerBot(dir.replace('auth_info_bot', '')));
@@ -181,20 +172,15 @@ async function startAdminBot() {
         const sender = msg.key.participant || msg.key.remoteJid;
         const isFromMe = msg.key.fromMe;
 
-        // 0. FITUR CEK ID GRUP (Berfungsi di grup mana saja)
         if (text === '!idgrup' && from.endsWith('@g.us')) {
             await adminSock.sendMessage(from, { text: `*ID Grup Ini:*\n${from}` }, { quoted: msg });
             return;
         }
 
-        // ============================================================
-        // BATASAN ADMIN: Perintah di bawah ini HANYA aktif di Grup Admin
-        // ============================================================
         if (from !== ADMIN_GROUP_ID) return;
 
         const actionText = text.trim().toUpperCase();
 
-        // 1. SISTEM PERSETUJUAN ADMIN (Quote Reply)
         const contextInfo = msg.message.extendedTextMessage?.contextInfo;
         if (contextInfo?.stanzaId && pendingApprovals.has(contextInfo.stanzaId)) {
             const botId = pendingApprovals.get(contextInfo.stanzaId);
@@ -213,14 +199,12 @@ async function startAdminBot() {
 
         if (isFromMe && !text.startsWith('!')) return;
 
-        // 2. FITUR INFO PANDUAN PENGGUNAAN
         if (text === '!info') {
             const infoMsg = `*🤖 SISTEM MULTI-BOT TERINTEGRASI 🤖*\n\n*👑 PERINTAH ADMIN*\n• *!info* : Menampilkan menu ini.\n• *!reqbot <id>* : Meminta penambahan bot baru.\n• *!batal* : Membatalkan proses scan.\n• *!list* : Melihat bot yang aktif.\n• *!stop <id>* : Menghentikan bot.\n• *!start <id>* : Menjalankan kembali bot.\n• *!restart <id>* : Merestart bot.\n• *!restartall* : Merestart keseluruhan sistem.`;
             await adminSock.sendMessage(from, { text: infoMsg }, { quoted: msg });
             return;
         }
 
-        // 3. REQUEST TAMBAH BOT OLEH USER
         if (text.startsWith('!reqbot')) {
             const botId = text.split(' ')[1];
             if (!botId) return adminSock.sendMessage(from, { text: 'Format: !reqbot <id>' });
@@ -300,7 +284,6 @@ async function startAdminBot() {
             return;
         }
 
-        // 4. BATALKAN REQUEST OLEH USER
         if (text === '!batal') {
             if (pendingSetups.has(sender)) {
                 const setup = pendingSetups.get(sender);
@@ -311,7 +294,6 @@ async function startAdminBot() {
             }
         }
 
-        // 5. MANAJEMEN BOT (START / STOP / RESTART / LIST)
         if (text === '!list') {
             let reply = `*🔥 DAFTAR BOT AKTIF (${activeBots.size})*\n`;
             for (let [id, data] of activeBots.entries()) {
@@ -376,6 +358,5 @@ setInterval(() => {
     }
 }, 60000);
 
-// Prevent Crash
 process.on('unhandledRejection', (err) => {});
 process.on('uncaughtException', (err) => {});

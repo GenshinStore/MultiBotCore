@@ -1,0 +1,1 @@
+const ADMIN_GROUP_ID = '120363409663500630@g.us'; 
