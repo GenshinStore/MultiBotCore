@@ -1,0 +1,1 @@
+npm install @whiskeysockets/baileys pino qrcode-terminal qrcode jimp qrcode-reader sharp crypto https pm2 -g
