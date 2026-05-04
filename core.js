@@ -29,7 +29,7 @@ const pendingApprovals = new Map();
 const duplicateCache = new Map(); 
 const allBotJids = new Set(); 
 
-// ================= HELPER MEDIA & QR SCANNER (SMART CROP) =================
+// ================= HELPER MEDIA & SMART QR SCANNER =================
 async function downloadMedia(mediaMsg, type) {
     try {
         if (mediaMsg.mediaKey) {
@@ -60,41 +60,64 @@ async function detectQR(buffer) {
         const w = meta.width;
         const h = meta.height;
 
-        const decodeBuffer = async (imgBuf) => {
+        if (!w || !h) return null;
+
+        console.log(`\n[DEBUG-QR] Memproses Media: Resolusi ${w}x${h}`);
+
+        const decodeBuffer = async (imgBuf, method) => {
             const image = await Jimp.read(imgBuf);
             return new Promise((resolve, reject) => {
                 const qr = new QrCode();
-                qr.callback = (e, v) => (e || !v) ? reject(e) : resolve(v.result);
+                qr.callback = (e, v) => (e || !v) ? reject(e) : resolve({ result: v.result, method });
                 qr.decode(image.bitmap);
             });
         };
 
-        // KUNCI PERBAIKAN: Buat area fokus. DANA QR selalu di tengah layar.
-        const crops = [ baseImg.clone() ]; // Variasi 1: Gambar Full
+        // KUNCI PERBAIKAN: Potong gambar menjadi area spesifik untuk menyingkirkan noise
+        let crops = [
+            { name: '1. Full Gambar Normal', img: baseImg.clone() },
+            { name: '2. Full Gambar Kontras Tinggi', img: baseImg.clone().normalize().greyscale() }
+        ];
+
+        // 3. Potong Bagian Kiri (Target: Screenshot DANA - QR selalu di kiri layar)
+        crops.push({ 
+            name: '3. Potong Area Kiri (Spesialis Screenshot)', 
+            img: baseImg.clone().extract({ left: 0, top: 0, width: Math.floor(w * 0.75), height: h }) 
+        });
+
+        // 4. Potong Bagian Atas (Target: Stiker DANA - QR biasa di atas teks/kartun)
+        crops.push({ 
+            name: '4. Potong Area Atas (Spesialis Stiker)', 
+            img: baseImg.clone().extract({ left: 0, top: 0, width: w, height: Math.floor(h * 0.75) }) 
+        });
+
+        // 5. Potong Kotak Tengah
+        const minDim = Math.min(w, h);
+        const size = Math.floor(minDim * 0.85);
+        crops.push({ 
+            name: '5. Potong Presisi Tengah', 
+            img: baseImg.clone().extract({ left: Math.floor((w - size) / 2), top: Math.floor((h - size) / 2), width: size, height: size }) 
+        });
+
+        // Resize ke 800px agar library tidak pusing membaca jutaan pixel
+        const bufferPromises = crops.map(async (c) => {
+            const buf = await c.img
+                .resize(800, 800, { fit: 'inside', withoutEnlargement: true })
+                .png()
+                .toBuffer();
+            return { name: c.name, buf };
+        });
+
+        const preparedBuffers = await Promise.all(bufferPromises);
+
+        console.log(`[DEBUG-QR] Menembakkan 5 metode "Sniper" secara bersamaan...`);
+        const resultObj = await Promise.any(preparedBuffers.map(pb => decodeBuffer(pb.buf, pb.name)));
         
-        if (w >= 300 && h >= 300) {
-            // Variasi 2: Crop 70% di tengah layar (Fokus Area)
-            const cw70 = Math.floor(w * 0.7); const ch70 = Math.floor(h * 0.7);
-            crops.push(baseImg.clone().extract({ left: Math.floor((w - cw70)/2), top: Math.floor((h - ch70)/2), width: cw70, height: ch70 }));
-            
-            // Variasi 3: Crop 50% di tengah layar (Fokus Khusus Kotak QR)
-            const cw50 = Math.floor(w * 0.5); const ch50 = Math.floor(h * 0.5);
-            crops.push(baseImg.clone().extract({ left: Math.floor((w - cw50)/2), top: Math.floor((h - ch50)/2), width: cw50, height: ch50 }));
-        }
-
-        let buffers = [];
-        for (const img of crops) {
-            buffers.push(img.clone().png().toBuffer());
-            buffers.push(img.clone().normalize().greyscale().png().toBuffer());
-            buffers.push(img.clone().greyscale().threshold(140).png().toBuffer());
-            buffers.push(img.clone().resize(600, 600, {fit: 'inside'}).png().toBuffer()); // Upscale/Downscale paksa
-        }
-
-        const preparedBuffers = await Promise.all(buffers);
-        // Adu kecepatan (Promise.any). Yang terbaca duluan langsung dieksekusi tanpa nunggu yang lain
-        return await Promise.any(preparedBuffers.map(buf => decodeBuffer(buf)));
-    } catch {
-        return null; // Gagal scan, abaikan tanpa mengirim log sampah
+        console.log(`[DEBUG-QR] ✅ BERHASIL! Ditemukan oleh [${resultObj.method}] -> Teks mentah: ${resultObj.result}`);
+        return resultObj.result;
+    } catch (e) {
+        console.log(`[DEBUG-QR] ❌ GAGAL. Semua 5 metode tidak mendeteksi QR. (Logo DANA mungkin terlalu besar / gambar sangat pecah)`);
+        return null;
     }
 }
 
@@ -121,21 +144,24 @@ function processExtractedLink(sock, textRaw, label) {
             const uLower = url.toLowerCase();
             
             if (uLower.includes('/minta') || uLower.endsWith('dana.id') || uLower.endsWith('dana.id/')) return;
-            if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) return;
+            
+            // JIKA TERTANGKAP TAPI TIDAK ADA KATA KAGET:
+            if (uLower.includes('dana.id') && !uLower.includes('kaget') && !uLower.includes('danakaget')) {
+                console.log(`[DEBUG-FILTER] ⛔ DIBLOKIR: Link DANA tapi BUKAN kaget -> ${url}`);
+                return;
+            }
 
             const finalUrl = url.startsWith('http') ? url : 'https://' + url;
-            
-            if (isDuplicate(finalUrl)) return; 
+            if (isDuplicate(finalUrl)) {
+                console.log(`[DEBUG-FILTER] ♻️ DUPLIKAT DIABAIKAN -> ${finalUrl}`);
+                return; 
+            }
 
-            // Log HANYA MUNCUL JIKA BERHASIL MENDAPATKAN LINK
-            console.log(`\n🚀 [BERHASIL!] Menemukan dan meneruskan: ${finalUrl} (Dari ${label})`);
+            console.log(`\n🚀 [TEMBUS!] Meneruskan: ${finalUrl} (Dari ${label})`);
             const msg = `${finalUrl}\n\nTipe: ${label}`;
             
             if (sock) {
-                // KIRIM UTAMA (Tanpa Delay)
                 sock.sendMessage(PRIMARY_GROUP_ID, { text: msg }).catch(() => {});
-                
-                // KIRIM KEDUA (Delay)
                 if (ENABLE_FORWARD_TO_SECONDARY) {
                     setTimeout(() => {
                         sock.sendMessage(SECONDARY_GROUP_ID, { text: msg }).catch(() => {});
