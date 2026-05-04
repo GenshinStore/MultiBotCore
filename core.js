@@ -14,7 +14,7 @@ const PRIMARY_GROUP_ID = '120363408426078537@g.us';
 const SECONDARY_GROUP_ID = '120363426296094605@g.us';
 
 const ENABLE_FORWARD_TO_SECONDARY = true;
-const DELAY_SECONDARY_MS = 60000; // ⏱️ Atur Delay Grup Kedua di sini (60000 = 60 detik / 1 menit)
+const DELAY_SECONDARY_MS = 1000; // ⏱ Atur Delay Grup Kedua di sini (60000 = 60 detik / 1 menit)
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 Menit Anti-Duplikat
 
 // ================= GLOBAL STATE (SHARED MEMORY) =================
