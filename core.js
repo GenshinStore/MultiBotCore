@@ -24,10 +24,11 @@ console.log = function() {
 
 // ================= CONFIGURATION =================
 const ADMIN_GROUP_ID = '120363409663500630@g.us'; 
-const PRIMARY_GROUP_ID = '120363408426078537@g.us';
-const SECONDARY_GROUP_ID = '120363426296094605@g.us';
+// const PRIMARY_GROUP_ID = '120363408426078537@g.us';
+const PRIMARY_GROUP_ID = '120363426296094605@g.us';
+const SECONDARY_GROUP_ID = '120363408426078537@g.us';
 
-const ENABLE_FORWARD_TO_SECONDARY = true;
+const ENABLE_FORWARD_TO_SECONDARY = false;
 const DELAY_SECONDARY_MS = 1000; 
 const CACHE_TTL_MS = 1 * 60 * 1000; 
 const VALID_DOMAINS = /(dana\.id|gopay\.co\.id|shopeepay\.co\.id)/i;
