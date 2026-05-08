@@ -26,6 +26,10 @@ const DEFAULT_ADMIN_GROUP = '120363429956751358@g.us';
 const DEFAULT_FORWARD_GROUP = '120363408426078537@g.us';
 const CONFIG_FILE = './config.json';
 
+// ======== TAMBAHKAN BARIS INI KEMBALI ========
+const CACHE_TTL_MS = 1 * 60 * 1000; // 1 Menit Anti Duplikat
+// =============================================
+
 // Inisialisasi State Default
 let configData = {
     adminGroups: [DEFAULT_ADMIN_GROUP],
