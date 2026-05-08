@@ -308,7 +308,8 @@ async function startWorkerBot(botId) {
         if (!msg.message || msg.key.fromMe) return;
 
         const from = msg.key.remoteJid;
-        if (from === PRIMARY_GROUP_ID || from === SECONDARY_GROUP_ID) return;
+        // Cegah worker bot memproses pesan dari daftar grup forward agar tidak terjadi looping
+        if (configData.forwardGroups.includes(from) || from === configData.priorityForwardGroup) return;
 
         const senderRaw = msg.key.participant || msg.key.remoteJid;
         const senderJid = senderRaw ? senderRaw.split(':')[0] + '@s.whatsapp.net' : '';
