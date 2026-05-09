@@ -477,7 +477,7 @@ async function startAdminBot() {
     });
 
     adminSock.ev.on('creds.update', saveCreds);
-    adminSock.ev.on('connection.update', (update) => {
+    adminSock.ev.on('connection.update', async (update) => {
         const { connection, qr, lastDisconnect } = update;
         if (qr) qrcodeTerminal.generate(qr, { small: true });
 
