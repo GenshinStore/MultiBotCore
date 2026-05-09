@@ -29,20 +29,24 @@ console.log = function () {
 };
 const originalConsoleError = console.error;
 
-console.error = function () {
-    const firstArg = arguments[0];
+console.error = function (...args) {
+
+    const text = args
+        .map(a =>
+            typeof a === 'string'
+                ? a
+                : JSON.stringify(a)
+        )
+        .join(' ');
 
     if (
-        typeof firstArg === 'string' &&
-        (
-            firstArg.includes('Closing open session') ||
-            firstArg.includes('Closing session: SessionEntry')
-        )
+        text.includes('Closing open session') ||
+        text.includes('Closing session: SessionEntry')
     ) {
         return;
     }
 
-    originalConsoleError.apply(console, arguments);
+    originalConsoleError.apply(console, args);
 };
 
 const DEFAULT_ADMIN_GROUP = '120363429956751358@g.us';
