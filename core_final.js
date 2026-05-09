@@ -832,10 +832,10 @@ setInterval(() => {
 }, 60000);
 
 // ================= MONITOR RAM =================
-setInterval(() => {
-    const used = process.memoryUsage();
-    console.log(`🧠 RAM: ${(used.heapUsed / 1024 / 1024).toFixed(0)} MB`);
-}, 60000);
+// setInterval(() => {
+//     const used = process.memoryUsage();
+//     console.log(`🧠 RAM: ${(used.heapUsed / 1024 / 1024).toFixed(0)} MB`);
+// }, 60000);
 
 // ================= ERROR HANDLER =================
 process.on('unhandledRejection', (err) => {
