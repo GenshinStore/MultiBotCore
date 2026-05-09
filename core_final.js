@@ -222,7 +222,7 @@ function processExtractedLink(sock, textRaw, label) {
         // });
         targets.forEach(target => {
             sock.sendMessage(target, {
-                text: `${finalUrl}\n ${label}`
+                text: `${finalUrl}\n${label}`
             }).catch(() => { });
         });
     });
