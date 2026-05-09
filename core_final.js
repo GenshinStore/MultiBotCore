@@ -904,42 +904,66 @@ async function startAdminBot() {
 
             console.log('🔄 SOFT RESTART DIMULAI');
 
-            // Matikan semua reconnect sementara
             global.isRestartingAll = true;
 
-            // Tutup semua worker
-            for (const [id, data] of activeBots.entries()) {
+            // Simpan semua ID dulu
+            const botIds = [...activeBots.keys()];
+
+            // Tutup semua bot
+            for (const id of botIds) {
+
                 try {
-                    data.sock.ev.removeAllListeners();
-                    data.sock.end(new Error('restart'));
+
+                    const botData = activeBots.get(id);
+
+                    if (botData?.sock) {
+
+                        try {
+                            botData.sock.ws.close();
+                        } catch { }
+
+                        try {
+                            botData.sock.end();
+                        } catch { }
+
+                    }
+
                 } catch (e) { }
 
-                activeBots.delete(id);
             }
 
-            // Bersihkan cache memory
+            // Bersihkan map setelah semua close
+            activeBots.clear();
+
+            // Reset cache
             duplicateCache.clear();
             allBotJids.clear();
 
-            // Tunggu sebentar
-            await new Promise(r => setTimeout(r, 3000));
+            console.log('⏳ Menunggu socket benar-benar mati...');
 
-            // Jalankan ulang semua worker
-            const dirs = fs.readdirSync(__dirname)
-                .filter(f => f.startsWith('auth_info_bot'));
+            // Tunggu agar session benar-benar release
+            await new Promise(r => setTimeout(r, 8000));
 
-            for (const dir of dirs) {
-                const id = dir.replace('auth_info_bot', '');
+            console.log('🚀 Menjalankan ulang worker...');
+
+            // Start ulang satu per satu
+            for (const id of botIds) {
 
                 try {
+
                     await startWorkerBot(id);
 
-                    // delay kecil agar CPU tidak spike
-                    await new Promise(r => setTimeout(r, 1000));
+                    console.log(`✅ Restart bot ${id}`);
+
+                    // Delay kecil agar tidak bentrok session
+                    await new Promise(r => setTimeout(r, 2500));
 
                 } catch (e) {
-                    console.log(`❌ Gagal restart bot ${id}`);
+
+                    console.log(`❌ Gagal restart bot ${id}:`, e.message);
+
                 }
+
             }
 
             global.isRestartingAll = false;
