@@ -15,7 +15,26 @@ sharp.concurrency(1);
 const mediaQueue = [];
 let processingQueue = false;
 
+// ================= BLOCK STDERR BAILEYS =================
+const originalStderrWrite = process.stderr.write.bind(process.stderr);
+
+process.stderr.write = (chunk, encoding, callback) => {
+
+    const text = chunk?.toString?.() || '';
+
+    if (
+        text.includes('Closing open session') ||
+        text.includes('Closing session: SessionEntry')
+    ) {
+        return true;
+    }
+
+    return originalStderrWrite(chunk, encoding, callback);
+};
+
 require('events').EventEmitter.defaultMaxListeners = 0;
+
+
 
 // ================= SILENCER (MEMBUNGKAM LOG INTERNAL BAILEYS) =================
 const originalConsoleLog = console.log;
