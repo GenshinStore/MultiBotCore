@@ -580,29 +580,29 @@ async function startAdminBot() {
                 });
             }
             const infoMsg = `*🤖 SISTEM MULTI-BOT TERINTEGRASI 🤖*
-                *👑 PERINTAH WORKER BOT*
-                • *!reqbot <id>* : Meminta penambahan bot.
-                • *!batal* : Membatalkan proses scan QR.
-                • *!list* : Melihat bot yang aktif.
-                • *!stop <id>* : Menghentikan bot.
-                • *!start <id>* : Menjalankan kembali bot.
-                • *!restart <id>* : Merestart bot.
+*👑 PERINTAH WORKER BOT*
+• *!reqbot <id>* : Meminta penambahan bot.
+• *!batal* : Membatalkan proses scan QR.
+• *!list* : Melihat bot yang aktif.
+• *!stop <id>* : Menghentikan bot.
+• *!start <id>* : Menjalankan kembali bot.
+• *!restart <id>* : Merestart bot.
 
-                *⚙️ MANAJEMEN ADMIN GRUP (Hanya Default Admin)*
-                • *!addadmin <id_grup@g.us>* : Menambah grup admin.
-                • *!deladmin <id_grup@g.us>* : Menghapus grup admin.
-                • *!listadmin* : Lihat daftar grup admin.
+*⚙️ MANAJEMEN ADMIN GRUP (Hanya Default Admin)*
+• *!addadmin <id_grup@g.us>* : Menambah grup admin.
+• *!deladmin <id_grup@g.us>* : Menghapus grup admin.
+• *!listadmin* : Lihat daftar grup admin.
 
-                *🚀 MANAJEMEN FORWARD GRUP (Hanya Default Admin)*
-                • *!addforward <id_grup@g.us>* : Menambah grup forward.
-                • *!delforward <id_grup@g.us>* : Menghapus grup forward.
-                • *!listforward* : Lihat daftar grup & mode saat ini.
-                • *!mode true* : Forward ke SEMUA grup terdaftar.
-                • *!mode false <id_grup@g.us>* : Forward HANYA ke 1 grup (Prioritas).
+*🚀 MANAJEMEN FORWARD GRUP (Hanya Default Admin)*
+• *!addforward <id_grup@g.us>* : Menambah grup forward.
+• *!delforward <id_grup@g.us>* : Menghapus grup forward.
+• *!listforward* : Lihat daftar grup & mode saat ini.
+• *!mode true* : Forward ke SEMUA grup terdaftar.
+• *!mode false <id_grup@g.us>* : Forward HANYA ke 1 grup (Prioritas).
 
-                *🔄 SISTEM*
-                • *!info* : Menampilkan menu ini.
-                • *!restartall* : Merestart keseluruhan sistem (Soft-Restart).`;
+*🔄 SISTEM*
+• *!info* : Menampilkan menu ini.
+• *!restartall* : Merestart keseluruhan sistem (Soft-Restart).`;
 
             await adminSock.sendMessage(from, { text: infoMsg }, { quoted: msg });
             return;
