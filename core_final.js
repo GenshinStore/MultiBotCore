@@ -275,7 +275,7 @@ async function startWorkerBot(botId) {
                 if (isResolved) return;
                 isResolved = true;
                 console.log(`[Bot ${botId}] ❌ Timeout connect`);
-                // try { sock.end(new Error('connect timeout')); } catch { }
+                try { sock.end(new Error('connect timeout')); } catch { }
                 resolve(false);
             }, 20000);
 
