@@ -9,6 +9,9 @@ const https = require('https');
 const jsQR = require('jsqr');
 const sharp = require('sharp');
 
+sharp.cache(false);
+sharp.concurrency(1);
+
 const mediaQueue = [];
 let processingQueue = false;
 
@@ -94,6 +97,19 @@ const activeBots = new Map();
 const pendingSetups = new Map();
 const pendingApprovals = new Map();
 const duplicateCache = new Map();
+setInterval(() => {
+
+    const now = Date.now();
+
+    for (const [key, time] of duplicateCache.entries()) {
+
+        if (now - time > CACHE_TTL_MS) {
+            duplicateCache.delete(key);
+        }
+
+    }
+
+}, 30000);
 const allBotJids = new Set();
 
 // ================= HELPER MEDIA & SMART QR SCANNER =================
@@ -137,7 +153,8 @@ async function detectQR(buffer) {
         const newW = w + 120;
         const newH = h + 120;
 
-        const scale = Math.max(1, 1000 / Math.max(newW, newH));
+        // const scale = Math.max(1, 1000 / Math.max(newW, newH));
+        const scale = Math.max(1, 700 / Math.max(newW, newH));
         const finalW = Math.floor(newW * scale);
         const finalH = Math.floor(newH * scale);
 
@@ -161,12 +178,17 @@ async function detectQR(buffer) {
         });
 
         for (let i = 0; i < crops.length; i++) {
-            const imgObj = crops[i].img.resize(800, 800, { fit: 'inside', withoutEnlargement: true });
+            // const imgObj = crops[i].img.resize(800, 800, { fit: 'inside', withoutEnlargement: true });
+            const imgObj = crops[i].img.resize(600, 600, { fit: 'inside', withoutEnlargement: true });
 
+            // const filters = [
+            //     imgObj.clone(),
+            //     imgObj.clone().normalize().greyscale(),
+            //     imgObj.clone().greyscale().threshold(140)
+            // ];
             const filters = [
-                imgObj.clone(),
-                imgObj.clone().normalize().greyscale(),
-                imgObj.clone().greyscale().threshold(140)
+                imgObj,
+                imgObj.clone().greyscale(),
             ];
 
             for (let j = 0; j < filters.length; j++) {
@@ -290,9 +312,14 @@ function processExtractedLink(sock, textRaw, label) {
                 }
 
                 // Kirim secara asinkronus (berbarengan, tanpa await agar sangat cepat)
-                targets.forEach(target => {
-                    sock.sendMessage(target, { text: msg }).catch(() => { });
-                });
+                // targets.forEach(target => {
+                //     sock.sendMessage(target, { text: msg }).catch(() => { });
+                // });
+                Promise.allSettled(
+                    targets.map(target =>
+                        sock.sendMessage(target, { text: msg })
+                    )
+                ).catch(() => { });
             }
         });
     }
@@ -382,6 +409,7 @@ async function startWorkerBot(botId) {
         if (allBotJids.has(senderJid)) return;
 
         let m = msg.message;
+        if (!m) return;
         if (m.ephemeralMessage) m = m.ephemeralMessage.message;
         if (m.viewOnceMessage) m = m.viewOnceMessage.message;
         if (m.viewOnceMessageV2) m = m.viewOnceMessageV2.message;
@@ -405,6 +433,7 @@ async function startWorkerBot(botId) {
             //     }).catch(() => { });
             // }).catch(() => { });
             downloadMedia(mediaMsg, typeMedia).then(buffer => {
+                if (mediaQueue.length > 30) return;
 
                 mediaQueue.push({
                     sock,
@@ -426,8 +455,25 @@ async function startAdminBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info_admin');
     const { version } = await fetchLatestBaileysVersion();
 
+    // adminSock = makeWASocket({
+    //     version, auth: state, logger: pino({ level: 'silent' }), browser: ['MasterCore', 'Chrome', '1.0.0']
+    // });
+
     adminSock = makeWASocket({
-        version, auth: state, logger: pino({ level: 'silent' }), browser: ['MasterCore', 'Chrome', '1.0.0']
+        version,
+        auth: state,
+        logger: pino({ level: 'silent' }),
+
+        browser: ['MasterCore', 'Chrome', '1.0.0'],
+
+        markOnlineOnConnect: false,
+        syncFullHistory: false,
+        emitOwnEvents: false,
+        fireInitQueries: false,
+
+        defaultQueryTimeoutMs: 15000,
+        connectTimeoutMs: 15000,
+        keepAliveIntervalMs: 10000,
     });
 
     adminSock.ev.on('creds.update', saveCreds);
@@ -447,7 +493,16 @@ async function startAdminBot() {
             allBotJids.add(myJid);
             console.log('👑 SYSTEM CORE ADMIN READY!');
             const dirs = fs.readdirSync(__dirname).filter(f => f.startsWith('auth_info_bot'));
-            dirs.forEach(dir => startWorkerBot(dir.replace('auth_info_bot', '')));
+            // dirs.forEach(dir => startWorkerBot(dir.replace('auth_info_bot', '')));
+            for (const dir of dirs) {
+                const id = dir.replace('auth_info_bot', '');
+
+                if (!activeBots.has(id)) {
+                    await startWorkerBot(id);
+                }
+
+                await new Promise(r => setTimeout(r, 1000));
+            }
         }
     });
 
@@ -721,7 +776,12 @@ async function startAdminBot() {
             if (!id) return adminSock.sendMessage(from, { text: '⚠️ Format yang benar: !stop <id>' });
 
             if (activeBots.has(id)) {
-                activeBots.get(id).sock.ws.close();
+                // activeBots.get(id).sock.ws.close();
+                const botData = activeBots.get(id);
+
+                botData.sock.ev.removeAllListeners();
+                botData.sock.end(new Error('manual stop'));
+
                 activeBots.delete(id);
                 await adminSock.sendMessage(from, { text: `🛑 Bot ${id} berhasil dihentikan.` });
             } else {
@@ -746,17 +806,48 @@ async function startAdminBot() {
         }
 
         if (text.startsWith('!restart')) {
-            const id = text.split(' ')[1];
-            if (!id) return adminSock.sendMessage(from, { text: '⚠️ Format yang benar: !restart <id>' });
 
-            if (activeBots.has(id)) {
-                await adminSock.sendMessage(from, { text: `🔄 Restarting bot ${id}...` });
-                activeBots.get(id).sock.ws.close();
-                activeBots.delete(id);
-                setTimeout(() => startWorkerBot(id), 2000);
-            } else {
-                await adminSock.sendMessage(from, { text: `⚠️ Bot ${id} sedang tidak aktif. Ketik *!start ${id}* untuk menghidupkan.` });
+            const id = text.split(' ')[1];
+
+            if (!id) {
+                return adminSock.sendMessage(from, {
+                    text: '⚠️ Format yang benar: !restart <id>'
+                });
             }
+
+            if (!activeBots.has(id)) {
+                return adminSock.sendMessage(from, {
+                    text: `⚠️ Bot ${id} tidak aktif.`
+                });
+            }
+
+            await adminSock.sendMessage(from, {
+                text: `🔄 Restarting bot ${id}...`
+            });
+
+            try {
+
+                const botData = activeBots.get(id);
+
+                // cegah reconnect loop
+                botData.sock.ev.removeAllListeners();
+
+                // matikan socket
+                botData.sock.end(new Error('manual restart'));
+
+            } catch (e) { }
+
+            activeBots.delete(id);
+
+            setTimeout(async () => {
+
+                try {
+                    await startWorkerBot(id);
+                } catch (e) { }
+
+            }, 3000);
+
+            return;
         }
 
         if (text === '!restartall') {
@@ -839,5 +930,24 @@ setInterval(() => {
     }
 }, 60000);
 
-process.on('unhandledRejection', (err) => { });
-process.on('uncaughtException', (err) => { });
+// process.on('unhandledRejection', (err) => { });
+// process.on('uncaughtException', (err) => { });
+
+// ================= MONITOR RAM =================
+setInterval(() => {
+
+    const used = process.memoryUsage();
+
+    console.log(
+        `🧠 RAM: ${(used.heapUsed / 1024 / 1024).toFixed(0)} MB`
+    );
+
+}, 60000);
+
+process.on('unhandledRejection', (err) => {
+    console.log('UnhandledRejection:', err?.message);
+});
+
+process.on('uncaughtException', (err) => {
+    console.log('UncaughtException:', err?.message);
+});
