@@ -456,12 +456,12 @@ async function startAdminBot() {
         }
 
         // Grup admin tambahan hanya boleh command terbatas
-        const LIMITED_COMMANDS = ['!list', '!restart', '!restartall'];
+        const LIMITED_COMMANDS = ['!list', '!restart', '!restartall', '!reqbot'];
         if (!isDefaultAdminGroup && text.startsWith('!')) {
             const cmd = text.split(' ')[0].toLowerCase();
             if (!LIMITED_COMMANDS.includes(cmd)) {
                 return adminSock.sendMessage(from, {
-                    text: `⚠️ Grup Admin Tambahan hanya bisa menggunakan:\n• !list\n• !restart <id>\n• !restartall`
+                    text: `⚠️ Grup Admin Tambahan hanya bisa menggunakan:\n• !list\n• !restart <id>\n• !restartall\n• !reqbot`
                 });
             }
         }
