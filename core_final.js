@@ -27,6 +27,23 @@ console.log = function () {
     }
     originalConsoleLog.apply(console, arguments);
 };
+const originalConsoleError = console.error;
+
+console.error = function () {
+    const firstArg = arguments[0];
+
+    if (
+        typeof firstArg === 'string' &&
+        (
+            firstArg.includes('Closing open session') ||
+            firstArg.includes('Closing session: SessionEntry')
+        )
+    ) {
+        return;
+    }
+
+    originalConsoleError.apply(console, arguments);
+};
 
 const DEFAULT_ADMIN_GROUP = '120363429956751358@g.us';
 const DEFAULT_FORWARD_GROUP = '120363408426078537@g.us';
