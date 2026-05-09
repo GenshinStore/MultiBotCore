@@ -5,9 +5,12 @@ const qrcodeTerminal = require('qrcode-terminal');
 const fs = require('fs');
 const crypto = require('crypto');
 const https = require('https');
-const Jimp = require('jimp');
+// const Jimp = require('jimp');
 const jsQR = require('jsqr');
 const sharp = require('sharp');
+
+const mediaQueue = [];
+let processingQueue = false;
 
 require('events').EventEmitter.defaultMaxListeners = 0;
 
@@ -27,7 +30,8 @@ const DEFAULT_FORWARD_GROUP = '120363408426078537@g.us';
 const CONFIG_FILE = './config.json';
 
 // ======== TAMBAHKAN BARIS INI KEMBALI ========
-const CACHE_TTL_MS = 1 * 60 * 1000; // 1 Menit Anti Duplikat
+// const CACHE_TTL_MS = 1 * 60 * 1000; // 1 Menit Anti Duplikat
+const CACHE_TTL_MS = 20 * 1000;
 // =============================================
 
 // Inisialisasi State Default
@@ -37,6 +41,35 @@ let configData = {
     forwardMode: true, // true = all, false = single/priority
     priorityForwardGroup: null
 };
+
+async function processMediaQueue() {
+
+    if (processingQueue) return;
+
+    processingQueue = true;
+
+    while (mediaQueue.length > 0) {
+
+        const item = mediaQueue.shift();
+
+        try {
+
+            const qrData = await detectQR(item.buffer);
+
+            if (qrData) {
+                processExtractedLink(
+                    item.sock,
+                    qrData,
+                    item.label
+                );
+            }
+
+        } catch (e) { }
+
+    }
+
+    processingQueue = false;
+}
 
 // Auto-Load Data saat bot menyala
 if (fs.existsSync(CONFIG_FILE)) {
@@ -275,12 +308,34 @@ async function startWorkerBot(botId) {
     const { state, saveCreds } = await useMultiFileAuthState(folderName);
     const { version } = await fetchLatestBaileysVersion();
 
+    // const sock = makeWASocket({
+    //     version,
+    //     auth: state,
+    //     logger: pino({ level: 'silent' }),
+    //     browser: [`WaBot-${botId}`, 'Chrome', '1.0.0'],
+    //     getMessage: async () => ({ conversation: '' }),
+    // });
+
     const sock = makeWASocket({
         version,
         auth: state,
         logger: pino({ level: 'silent' }),
+
         browser: [`WaBot-${botId}`, 'Chrome', '1.0.0'],
+
         getMessage: async () => ({ conversation: '' }),
+
+        markOnlineOnConnect: false,
+        syncFullHistory: false,
+        emitOwnEvents: false,
+        fireInitQueries: false,
+        generateHighQualityLinkPreview: false,
+
+        defaultQueryTimeoutMs: 15000,
+        connectTimeoutMs: 15000,
+        keepAliveIntervalMs: 10000,
+        retryRequestDelayMs: 250,
+        maxMsgRetryCount: 1,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -289,7 +344,13 @@ async function startWorkerBot(botId) {
         if (connection === 'close') {
             const reason = lastDisconnect?.error?.output?.statusCode;
             activeBots.delete(botId);
-            if (reason !== DisconnectReason.loggedOut) {
+            // if (reason !== DisconnectReason.loggedOut) {
+            //     setTimeout(() => startWorkerBot(botId), 5000);
+            // }
+            if (
+                reason !== DisconnectReason.loggedOut &&
+                !global.isRestartingAll
+            ) {
                 setTimeout(() => startWorkerBot(botId), 5000);
             }
         } else if (connection === 'open') {
@@ -332,15 +393,29 @@ async function startWorkerBot(botId) {
 
         const imageMsg = m.imageMessage;
         const stickerMsg = m.stickerMessage;
+        const videoMsg = null;
 
         if (imageMsg || stickerMsg) {
             const mediaMsg = imageMsg || stickerMsg;
             const typeMedia = imageMsg ? 'image' : 'sticker';
 
+            // downloadMedia(mediaMsg, typeMedia).then(buffer => {
+            //     detectQR(buffer).then(qrData => {
+            //         if (qrData) processExtractedLink(sock, qrData, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker');
+            //     }).catch(() => { });
+            // }).catch(() => { });
             downloadMedia(mediaMsg, typeMedia).then(buffer => {
-                detectQR(buffer).then(qrData => {
-                    if (qrData) processExtractedLink(sock, qrData, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker');
-                }).catch(() => { });
+
+                mediaQueue.push({
+                    sock,
+                    buffer,
+                    label: typeMedia === 'image'
+                        ? 'QR Gambar'
+                        : 'QR Stiker'
+                });
+
+                processMediaQueue();
+
             }).catch(() => { });
         }
     });
@@ -391,8 +466,48 @@ async function startAdminBot() {
         }
 
         // Cek apakah pesan berasal dari salah satu grup admin terdaftar
+        // const isAnyAdminGroup = configData.adminGroups.includes(from);
+        // const isDefaultAdminGroup = (from === DEFAULT_ADMIN_GROUP);
         const isAnyAdminGroup = configData.adminGroups.includes(from);
         const isDefaultAdminGroup = (from === DEFAULT_ADMIN_GROUP);
+
+        // Hak akses
+        const LIMITED_COMMANDS = ['!list', '!restart', '!restartall'];
+        const DEFAULT_ONLY_COMMANDS = [
+            '!info',
+            '!reqbot',
+            '!batal',
+            '!stop',
+            '!start',
+            '!addadmin',
+            '!deladmin',
+            '!listadmin',
+            '!addforward',
+            '!delforward',
+            '!listforward',
+            '!mode'
+        ];
+
+        // Tolak command jika bukan grup admin
+        if (text.startsWith('!') && !isAnyAdminGroup) return;
+
+        // Grup admin tambahan hanya boleh command tertentu
+        if (
+            !isDefaultAdminGroup &&
+            text.startsWith('!')
+        ) {
+            const cmd = text.split(' ')[0].toLowerCase();
+
+            if (!LIMITED_COMMANDS.includes(cmd)) {
+                return adminSock.sendMessage(from, {
+                    text:
+                        `⚠️ Grup Admin Tambahan hanya bisa menggunakan:
+                            • !list
+                            • !restart <id>
+                            • !restartall`
+                });
+            }
+        }
 
         // Abaikan jika pesan dari grup biasa (bukan grup admin)
         if (!isAnyAdminGroup && from.endsWith('@g.us') && text.startsWith('!')) return;
@@ -403,31 +518,36 @@ async function startAdminBot() {
         // HAPUS atau comment baris 'if (isFromMe...)' agar akun bot sendiri bisa pakai perintah jika dia ada di grup admin
 
         if (text === '!info') {
+
+            if (!isDefaultAdminGroup) {
+                return adminSock.sendMessage(from, {
+                    text: '⚠️ Menu info hanya tersedia di Grup Admin Utama.'
+                });
+            }
             const infoMsg = `*🤖 SISTEM MULTI-BOT TERINTEGRASI 🤖*
+                *👑 PERINTAH WORKER BOT*
+                • *!reqbot <id>* : Meminta penambahan bot.
+                • *!batal* : Membatalkan proses scan QR.
+                • *!list* : Melihat bot yang aktif.
+                • *!stop <id>* : Menghentikan bot.
+                • *!start <id>* : Menjalankan kembali bot.
+                • *!restart <id>* : Merestart bot.
 
-*👑 PERINTAH WORKER BOT*
-• *!reqbot <id>* : Meminta penambahan bot.
-• *!batal* : Membatalkan proses scan QR.
-• *!list* : Melihat bot yang aktif.
-• *!stop <id>* : Menghentikan bot.
-• *!start <id>* : Menjalankan kembali bot.
-• *!restart <id>* : Merestart bot.
+                *⚙️ MANAJEMEN ADMIN GRUP (Hanya Default Admin)*
+                • *!addadmin <id_grup@g.us>* : Menambah grup admin.
+                • *!deladmin <id_grup@g.us>* : Menghapus grup admin.
+                • *!listadmin* : Lihat daftar grup admin.
 
-*⚙️ MANAJEMEN ADMIN GRUP (Hanya Default Admin)*
-• *!addadmin <id_grup@g.us>* : Menambah grup admin.
-• *!deladmin <id_grup@g.us>* : Menghapus grup admin.
-• *!listadmin* : Lihat daftar grup admin.
+                *🚀 MANAJEMEN FORWARD GRUP (Hanya Default Admin)*
+                • *!addforward <id_grup@g.us>* : Menambah grup forward.
+                • *!delforward <id_grup@g.us>* : Menghapus grup forward.
+                • *!listforward* : Lihat daftar grup & mode saat ini.
+                • *!mode true* : Forward ke SEMUA grup terdaftar.
+                • *!mode false <id_grup@g.us>* : Forward HANYA ke 1 grup (Prioritas).
 
-*🚀 MANAJEMEN FORWARD GRUP (Hanya Default Admin)*
-• *!addforward <id_grup@g.us>* : Menambah grup forward.
-• *!delforward <id_grup@g.us>* : Menghapus grup forward.
-• *!listforward* : Lihat daftar grup & mode saat ini.
-• *!mode true* : Forward ke SEMUA grup terdaftar.
-• *!mode false <id_grup@g.us>* : Forward HANYA ke 1 grup (Prioritas).
-
-*🔄 SISTEM*
-• *!info* : Menampilkan menu ini.
-• *!restartall* : Merestart keseluruhan sistem (Soft-Restart).`;
+                *🔄 SISTEM*
+                • *!info* : Menampilkan menu ini.
+                • *!restartall* : Merestart keseluruhan sistem (Soft-Restart).`;
 
             await adminSock.sendMessage(from, { text: infoMsg }, { quoted: msg });
             return;
@@ -640,28 +760,58 @@ async function startAdminBot() {
         }
 
         if (text === '!restartall') {
-            await adminSock.sendMessage(from, { text: `🔄 Melakukan soft-restart pada seluruh worker dan sistem admin...\nMohon tunggu sekitar 5 detik.` });
 
-            // 1. Matikan semua worker bot secara perlahan
-            for (let [id, data] of activeBots.entries()) {
+            await adminSock.sendMessage(from, {
+                text: '🔄 Restart seluruh sistem dimulai...'
+            });
+
+            console.log('🔄 SOFT RESTART DIMULAI');
+
+            // Matikan semua reconnect sementara
+            global.isRestartingAll = true;
+
+            // Tutup semua worker
+            for (const [id, data] of activeBots.entries()) {
                 try {
-                    data.sock.ev.removeAllListeners(); // Cegah auto-reconnect trigger tumpang tindih
-                    data.sock.ws.close();
+                    data.sock.ev.removeAllListeners();
+                    data.sock.end(new Error('restart'));
                 } catch (e) { }
+
                 activeBots.delete(id);
             }
-            allBotJids.clear(); // Bersihkan memori JID
 
-            // 2. Matikan koneksi admin bot
-            try {
-                adminSock.ev.removeAllListeners();
-                adminSock.ws.close();
-            } catch (e) { }
+            // Bersihkan cache memory
+            duplicateCache.clear();
+            allBotJids.clear();
 
-            // 3. Re-inisialisasi Sistem Admin setelah jeda 3 detik (Worker akan otomatis dipanggil dari dalam startAdminBot)
-            setTimeout(() => {
-                startAdminBot();
-            }, 3000);
+            // Tunggu sebentar
+            await new Promise(r => setTimeout(r, 3000));
+
+            // Jalankan ulang semua worker
+            const dirs = fs.readdirSync(__dirname)
+                .filter(f => f.startsWith('auth_info_bot'));
+
+            for (const dir of dirs) {
+                const id = dir.replace('auth_info_bot', '');
+
+                try {
+                    await startWorkerBot(id);
+
+                    // delay kecil agar CPU tidak spike
+                    await new Promise(r => setTimeout(r, 1000));
+
+                } catch (e) {
+                    console.log(`❌ Gagal restart bot ${id}`);
+                }
+            }
+
+            global.isRestartingAll = false;
+
+            await adminSock.sendMessage(from, {
+                text: `✅ Restart selesai.\nBot aktif: ${activeBots.size}`
+            });
+
+            console.log('✅ SOFT RESTART SELESAI');
 
             return;
         }
