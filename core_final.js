@@ -851,7 +851,7 @@ async function startAdminBot() {
             }
         }
 
-        if (text.startsWith('!restart')) {
+        if (text.startsWith('!restart ')) {
 
             const id = text.split(' ')[1];
 
