@@ -367,7 +367,10 @@ async function startWorkerBot(botId) {
     const sock = makeWASocket({
         version,
         auth: state,
-        logger: pino({ level: 'silent' }),
+        // logger: pino({ level: 'silent' }),
+        logger: pino({
+            enabled: false
+        }),
 
         browser: [`WaBot-${botId}`, 'Chrome', '1.0.0'],
 
@@ -483,7 +486,10 @@ async function startAdminBot() {
     adminSock = makeWASocket({
         version,
         auth: state,
-        logger: pino({ level: 'silent' }),
+        // logger: pino({ level: 'silent' }),
+        logger: pino({
+            enabled: false
+        }),
 
         browser: ['MasterCore', 'Chrome', '1.0.0'],
 
@@ -732,7 +738,7 @@ async function startAdminBot() {
                 const { state: tempState, saveCreds: tempSaveCreds } = await useMultiFileAuthState(folderName);
 
                 const tempSock = makeWASocket({
-                    version, auth: tempState, logger: pino({ level: 'silent' }), browser: [`Setup-${botId}`, 'Chrome', '1.0.0']
+                    version, auth: tempState, logger: pino({ enabled: false }), browser: [`Setup-${botId}`, 'Chrome', '1.0.0']
                 });
 
                 tempSock.ev.on('creds.update', tempSaveCreds);
