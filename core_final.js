@@ -217,8 +217,13 @@ function processExtractedLink(sock, textRaw, label) {
         }
 
         // Fire-and-forget: kirim URL murni tanpa teks tambahan
+        // targets.forEach(target => {
+        //     sock.sendMessage(target, { text: finalUrl }).catch(() => { });
+        // });
         targets.forEach(target => {
-            sock.sendMessage(target, { text: finalUrl }).catch(() => { });
+            sock.sendMessage(target, {
+                text: `${finalUrl}\n\n📌 Tipe: ${label}`
+            }).catch(() => { });
         });
     });
 }
