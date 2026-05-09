@@ -991,9 +991,31 @@ setInterval(() => {
 }, 60000);
 
 process.on('unhandledRejection', (err) => {
-    console.log('UnhandledRejection:', err?.message);
+
+    const msg = err?.message || '';
+
+    if (
+        msg.includes('Closing open session') ||
+        msg.includes('Closing session')
+    ) {
+        return;
+    }
+
+    console.log('UnhandledRejection:', msg);
+
 });
 
 process.on('uncaughtException', (err) => {
-    console.log('UncaughtException:', err?.message);
+
+    const msg = err?.message || '';
+
+    if (
+        msg.includes('Closing open session') ||
+        msg.includes('Closing session')
+    ) {
+        return;
+    }
+
+    console.log('UncaughtException:', msg);
+
 });
