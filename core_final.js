@@ -366,131 +366,469 @@ function processExtractedLink(sock, textRaw, label) {
 }
 
 // ================= WORKER BOT MANAGER =================
+// async function startWorkerBot(botId) {
+//     if (activeBots.has(botId)) return;
+
+//     const folderName = `auth_info_bot${botId}`;
+//     if (!fs.existsSync(folderName)) return;
+
+//     const { state, saveCreds } = await useMultiFileAuthState(folderName);
+//     const { version } = await fetchLatestBaileysVersion();
+
+//     // const sock = makeWASocket({
+//     //     version,
+//     //     auth: state,
+//     //     logger: pino({ level: 'silent' }),
+//     //     browser: [`WaBot-${botId}`, 'Chrome', '1.0.0'],
+//     //     getMessage: async () => ({ conversation: '' }),
+//     // });
+
+//     const sock = makeWASocket({
+//         version,
+//         auth: state,
+//         // logger: pino({ level: 'silent' }),
+//         logger: pino({
+//             enabled: false
+//         }),
+
+//         browser: [`WaBot-${botId}`, 'Chrome', '1.0.0'],
+
+//         getMessage: async () => ({ conversation: '' }),
+
+//         markOnlineOnConnect: false,
+//         syncFullHistory: false,
+//         emitOwnEvents: false,
+//         fireInitQueries: false,
+//         generateHighQualityLinkPreview: false,
+
+//         defaultQueryTimeoutMs: 15000,
+//         connectTimeoutMs: 15000,
+//         keepAliveIntervalMs: 10000,
+//         retryRequestDelayMs: 250,
+//         maxMsgRetryCount: 1,
+//     });
+
+//     sock.ev.on('creds.update', saveCreds);
+//     sock.ev.on('connection.update', (update) => {
+//         const { connection, lastDisconnect } = update;
+//         if (connection === 'close') {
+//             const reason = lastDisconnect?.error?.output?.statusCode;
+//             activeBots.delete(botId);
+//             // if (reason !== DisconnectReason.loggedOut) {
+//             //     setTimeout(() => startWorkerBot(botId), 5000);
+//             // }
+//             if (
+//                 reason !== DisconnectReason.loggedOut &&
+//                 !global.isRestartingAll
+//             ) {
+//                 setTimeout(() => startWorkerBot(botId), 5000);
+//             }
+//         } else if (connection === 'open') {
+//             const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
+//             allBotJids.add(myJid);
+//             console.log(`[Bot ${botId}] 🟢 READY (${myJid})`);
+//             activeBots.set(botId, { sock, startTime: Date.now() });
+//         }
+//     });
+
+//     sock.ev.on('groups.update', updates => {
+//         for (const u of updates) {
+//             if (u.desc) processExtractedLink(sock, u.desc.toString(), 'Deskripsi Grup');
+//         }
+//     });
+
+//     sock.ev.on('messages.upsert', async ({ messages, type }) => {
+//         if (type !== 'notify') return;
+//         const msg = messages[0];
+//         if (!msg.message || msg.key.fromMe) return;
+
+//         const from = msg.key.remoteJid;
+//         // Cegah worker bot memproses pesan dari daftar grup forward agar tidak terjadi looping
+//         if (configData.forwardGroups.includes(from) || from === configData.priorityForwardGroup) return;
+
+//         const senderRaw = msg.key.participant || msg.key.remoteJid;
+//         const senderJid = senderRaw ? senderRaw.split(':')[0] + '@s.whatsapp.net' : '';
+
+//         if (allBotJids.has(senderJid)) return;
+
+//         let m = msg.message;
+//         if (!m) return;
+//         if (m.ephemeralMessage) m = m.ephemeralMessage.message;
+//         if (m.viewOnceMessage) m = m.viewOnceMessage.message;
+//         if (m.viewOnceMessageV2) m = m.viewOnceMessageV2.message;
+//         if (m.viewOnceMessageV2Extension) m = m.viewOnceMessageV2Extension.message;
+//         if (m.documentWithCaptionMessage) m = m.documentWithCaptionMessage.message;
+
+//         const text = m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || '';
+//         if (text) processExtractedLink(sock, text, 'Link Teks');
+
+//         const imageMsg = m.imageMessage;
+//         const stickerMsg = m.stickerMessage;
+//         const videoMsg = null;
+
+//         if (imageMsg || stickerMsg) {
+//             const mediaMsg = imageMsg || stickerMsg;
+//             const typeMedia = imageMsg ? 'image' : 'sticker';
+
+//             // downloadMedia(mediaMsg, typeMedia).then(buffer => {
+//             //     detectQR(buffer).then(qrData => {
+//             //         if (qrData) processExtractedLink(sock, qrData, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker');
+//             //     }).catch(() => { });
+//             // }).catch(() => { });
+//             downloadMedia(mediaMsg, typeMedia).then(buffer => {
+//                 if (mediaQueue.length > 30) return;
+
+//                 mediaQueue.push({
+//                     sock,
+//                     buffer,
+//                     label: typeMedia === 'image'
+//                         ? 'QR Gambar'
+//                         : 'QR Stiker'
+//                 });
+
+//                 processMediaQueue();
+
+//             }).catch(() => { });
+//         }
+//     });
+// }
 async function startWorkerBot(botId) {
-    if (activeBots.has(botId)) return;
 
-    const folderName = `auth_info_bot${botId}`;
-    if (!fs.existsSync(folderName)) return;
+    // Cegah double start
+    if (activeBots.has(botId)) {
+        return true;
+    }
 
-    const { state, saveCreds } = await useMultiFileAuthState(folderName);
-    const { version } = await fetchLatestBaileysVersion();
+    return new Promise(async (resolve) => {
 
-    // const sock = makeWASocket({
-    //     version,
-    //     auth: state,
-    //     logger: pino({ level: 'silent' }),
-    //     browser: [`WaBot-${botId}`, 'Chrome', '1.0.0'],
-    //     getMessage: async () => ({ conversation: '' }),
-    // });
+        const folderName = `auth_info_bot${botId}`;
 
-    const sock = makeWASocket({
-        version,
-        auth: state,
-        // logger: pino({ level: 'silent' }),
-        logger: pino({
-            enabled: false
-        }),
-
-        browser: [`WaBot-${botId}`, 'Chrome', '1.0.0'],
-
-        getMessage: async () => ({ conversation: '' }),
-
-        markOnlineOnConnect: false,
-        syncFullHistory: false,
-        emitOwnEvents: false,
-        fireInitQueries: false,
-        generateHighQualityLinkPreview: false,
-
-        defaultQueryTimeoutMs: 15000,
-        connectTimeoutMs: 15000,
-        keepAliveIntervalMs: 10000,
-        retryRequestDelayMs: 250,
-        maxMsgRetryCount: 1,
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'close') {
-            const reason = lastDisconnect?.error?.output?.statusCode;
-            activeBots.delete(botId);
-            // if (reason !== DisconnectReason.loggedOut) {
-            //     setTimeout(() => startWorkerBot(botId), 5000);
-            // }
-            if (
-                reason !== DisconnectReason.loggedOut &&
-                !global.isRestartingAll
-            ) {
-                setTimeout(() => startWorkerBot(botId), 5000);
-            }
-        } else if (connection === 'open') {
-            const myJid = sock.user.id.split(':')[0] + '@s.whatsapp.net';
-            allBotJids.add(myJid);
-            console.log(`[Bot ${botId}] 🟢 READY (${myJid})`);
-            activeBots.set(botId, { sock, startTime: Date.now() });
+        if (!fs.existsSync(folderName)) {
+            console.log(`[Bot ${botId}] Session tidak ditemukan`);
+            return resolve(false);
         }
-    });
 
-    sock.ev.on('groups.update', updates => {
-        for (const u of updates) {
-            if (u.desc) processExtractedLink(sock, u.desc.toString(), 'Deskripsi Grup');
+        try {
+
+            const { state, saveCreds } =
+                await useMultiFileAuthState(folderName);
+
+            const { version } =
+                await fetchLatestBaileysVersion();
+
+            const sock = makeWASocket({
+
+                version,
+                auth: state,
+
+                logger: pino({
+                    enabled: false
+                }),
+
+                browser: [
+                    `WaBot-${botId}`,
+                    'Chrome',
+                    '1.0.0'
+                ],
+
+                getMessage: async () => ({
+                    conversation: ''
+                }),
+
+                markOnlineOnConnect: false,
+                syncFullHistory: false,
+                emitOwnEvents: false,
+                fireInitQueries: false,
+                generateHighQualityLinkPreview: false,
+
+                defaultQueryTimeoutMs: 15000,
+                connectTimeoutMs: 15000,
+                keepAliveIntervalMs: 10000,
+                retryRequestDelayMs: 250,
+                maxMsgRetryCount: 1,
+            });
+
+            // ================= TIMEOUT =================
+
+            let isResolved = false;
+
+            const timeout = setTimeout(() => {
+
+                if (isResolved) return;
+
+                isResolved = true;
+
+                console.log(
+                    `[Bot ${botId}] ❌ Timeout connect`
+                );
+
+                try {
+                    sock.ws.close();
+                } catch { }
+
+                resolve(false);
+
+            }, 30000);
+
+            // ================= SAVE CREDS =================
+
+            sock.ev.on(
+                'creds.update',
+                saveCreds
+            );
+
+            // ================= CONNECTION =================
+
+            sock.ev.on(
+                'connection.update',
+                async (update) => {
+
+                    const {
+                        connection,
+                        lastDisconnect
+                    } = update;
+
+                    // ================= CLOSE =================
+
+                    if (connection === 'close') {
+
+                        activeBots.delete(botId);
+
+                        const reason =
+                            lastDisconnect?.error?.output?.statusCode;
+
+                        console.log(
+                            `[Bot ${botId}] 🔴 Connection Closed`
+                        );
+
+                        // Jika belum resolve
+                        if (!isResolved) {
+
+                            isResolved = true;
+
+                            clearTimeout(timeout);
+
+                            resolve(false);
+
+                        }
+
+                        // Auto reconnect
+                        if (
+                            reason !== DisconnectReason.loggedOut &&
+                            !global.isRestartingAll
+                        ) {
+
+                            console.log(
+                                `[Bot ${botId}] ♻️ Reconnecting...`
+                            );
+
+                            setTimeout(() => {
+
+                                startWorkerBot(botId);
+
+                            }, 5000);
+
+                        }
+
+                    }
+
+                    // ================= OPEN =================
+
+                    else if (connection === 'open') {
+
+                        const myJid =
+                            sock.user.id.split(':')[0] +
+                            '@s.whatsapp.net';
+
+                        allBotJids.add(myJid);
+
+                        activeBots.set(botId, {
+                            sock,
+                            startTime: Date.now()
+                        });
+
+                        console.log(
+                            `[Bot ${botId}] 🟢 READY (${myJid})`
+                        );
+
+                        if (!isResolved) {
+
+                            isResolved = true;
+
+                            clearTimeout(timeout);
+
+                            resolve(true);
+
+                        }
+
+                    }
+
+                }
+            );
+
+            // ================= GROUP UPDATE =================
+
+            sock.ev.on('groups.update', updates => {
+
+                for (const u of updates) {
+
+                    if (u.desc) {
+
+                        processExtractedLink(
+                            sock,
+                            u.desc.toString(),
+                            'Deskripsi Grup'
+                        );
+
+                    }
+
+                }
+
+            });
+
+            // ================= MESSAGE =================
+
+            sock.ev.on(
+                'messages.upsert',
+                async ({ messages, type }) => {
+
+                    if (type !== 'notify') return;
+
+                    const msg = messages[0];
+
+                    if (
+                        !msg.message ||
+                        msg.key.fromMe
+                    ) return;
+
+                    const from =
+                        msg.key.remoteJid;
+
+                    // Anti loop grup forward
+                    if (
+                        configData.forwardGroups.includes(from) ||
+                        from === configData.priorityForwardGroup
+                    ) return;
+
+                    const senderRaw =
+                        msg.key.participant ||
+                        msg.key.remoteJid;
+
+                    const senderJid =
+                        senderRaw
+                            ? senderRaw.split(':')[0] +
+                            '@s.whatsapp.net'
+                            : '';
+
+                    // Anti sesama bot
+                    if (
+                        allBotJids.has(senderJid)
+                    ) return;
+
+                    let m = msg.message;
+
+                    if (!m) return;
+
+                    if (m.ephemeralMessage)
+                        m = m.ephemeralMessage.message;
+
+                    if (m.viewOnceMessage)
+                        m = m.viewOnceMessage.message;
+
+                    if (m.viewOnceMessageV2)
+                        m = m.viewOnceMessageV2.message;
+
+                    if (m.viewOnceMessageV2Extension)
+                        m = m.viewOnceMessageV2Extension.message;
+
+                    if (m.documentWithCaptionMessage)
+                        m = m.documentWithCaptionMessage.message;
+
+                    const text =
+                        m.conversation ||
+                        m.extendedTextMessage?.text ||
+                        m.imageMessage?.caption ||
+                        m.videoMessage?.caption ||
+                        '';
+
+                    // ================= LINK TEXT =================
+
+                    if (text) {
+
+                        processExtractedLink(
+                            sock,
+                            text,
+                            'Link Teks'
+                        );
+
+                    }
+
+                    // ================= MEDIA =================
+
+                    const imageMsg =
+                        m.imageMessage;
+
+                    const stickerMsg =
+                        m.stickerMessage;
+
+                    if (
+                        imageMsg ||
+                        stickerMsg
+                    ) {
+
+                        const mediaMsg =
+                            imageMsg ||
+                            stickerMsg;
+
+                        const typeMedia =
+                            imageMsg
+                                ? 'image'
+                                : 'sticker';
+
+                        downloadMedia(
+                            mediaMsg,
+                            typeMedia
+                        ).then(buffer => {
+
+                            if (
+                                mediaQueue.length > 30
+                            ) return;
+
+                            mediaQueue.push({
+
+                                sock,
+
+                                buffer,
+
+                                label:
+                                    typeMedia === 'image'
+                                        ? 'QR Gambar'
+                                        : 'QR Stiker'
+
+                            });
+
+                            processMediaQueue();
+
+                        }).catch(() => { });
+
+                    }
+
+                }
+            );
+
+        } catch (err) {
+
+            console.log(
+                `[Bot ${botId}] ❌ Error:`,
+                err.message
+            );
+
+            resolve(false);
+
         }
+
     });
 
-    sock.ev.on('messages.upsert', async ({ messages, type }) => {
-        if (type !== 'notify') return;
-        const msg = messages[0];
-        if (!msg.message || msg.key.fromMe) return;
-
-        const from = msg.key.remoteJid;
-        // Cegah worker bot memproses pesan dari daftar grup forward agar tidak terjadi looping
-        if (configData.forwardGroups.includes(from) || from === configData.priorityForwardGroup) return;
-
-        const senderRaw = msg.key.participant || msg.key.remoteJid;
-        const senderJid = senderRaw ? senderRaw.split(':')[0] + '@s.whatsapp.net' : '';
-
-        if (allBotJids.has(senderJid)) return;
-
-        let m = msg.message;
-        if (!m) return;
-        if (m.ephemeralMessage) m = m.ephemeralMessage.message;
-        if (m.viewOnceMessage) m = m.viewOnceMessage.message;
-        if (m.viewOnceMessageV2) m = m.viewOnceMessageV2.message;
-        if (m.viewOnceMessageV2Extension) m = m.viewOnceMessageV2Extension.message;
-        if (m.documentWithCaptionMessage) m = m.documentWithCaptionMessage.message;
-
-        const text = m.conversation || m.extendedTextMessage?.text || m.imageMessage?.caption || m.videoMessage?.caption || '';
-        if (text) processExtractedLink(sock, text, 'Link Teks');
-
-        const imageMsg = m.imageMessage;
-        const stickerMsg = m.stickerMessage;
-        const videoMsg = null;
-
-        if (imageMsg || stickerMsg) {
-            const mediaMsg = imageMsg || stickerMsg;
-            const typeMedia = imageMsg ? 'image' : 'sticker';
-
-            // downloadMedia(mediaMsg, typeMedia).then(buffer => {
-            //     detectQR(buffer).then(qrData => {
-            //         if (qrData) processExtractedLink(sock, qrData, typeMedia === 'image' ? 'QR Gambar' : 'QR Stiker');
-            //     }).catch(() => { });
-            // }).catch(() => { });
-            downloadMedia(mediaMsg, typeMedia).then(buffer => {
-                if (mediaQueue.length > 30) return;
-
-                mediaQueue.push({
-                    sock,
-                    buffer,
-                    label: typeMedia === 'image'
-                        ? 'QR Gambar'
-                        : 'QR Stiker'
-                });
-
-                processMediaQueue();
-
-            }).catch(() => { });
-        }
-    });
 }
 
 // ================= ADMIN SYSTEM =================
