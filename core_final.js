@@ -222,7 +222,7 @@ function processExtractedLink(sock, textRaw, label) {
         // });
         targets.forEach(target => {
             sock.sendMessage(target, {
-                text: `${finalUrl}\n\nTipe: ${label}`
+                text: `${finalUrl}\n ${label}`
             }).catch(() => { });
         });
     });
@@ -254,9 +254,9 @@ async function startWorkerBot(botId) {
                 emitOwnEvents: false,
                 fireInitQueries: false,
                 generateHighQualityLinkPreview: false,
-                defaultQueryTimeoutMs: 15000,
-                connectTimeoutMs: 15000,
-                keepAliveIntervalMs: 10000,
+                connectTimeoutMs: 60000,
+                defaultQueryTimeoutMs: 60000,
+                keepAliveIntervalMs: 30000,
                 retryRequestDelayMs: 250,
                 maxMsgRetryCount: 1,
                 // [FIX] Cegah link preview server-side pada pesan yang dikirim bot
@@ -275,7 +275,7 @@ async function startWorkerBot(botId) {
                 if (isResolved) return;
                 isResolved = true;
                 console.log(`[Bot ${botId}] ❌ Timeout connect`);
-                try { sock.end(new Error('connect timeout')); } catch { }
+                // try { sock.end(new Error('connect timeout')); } catch { }
                 resolve(false);
             }, 20000);
 
@@ -385,9 +385,9 @@ async function startAdminBot() {
         syncFullHistory: false,
         emitOwnEvents: false,
         fireInitQueries: false,
-        defaultQueryTimeoutMs: 15000,
-        connectTimeoutMs: 15000,
-        keepAliveIntervalMs: 10000,
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 60000,
+        keepAliveIntervalMs: 30000,
     });
 
     adminSock.ev.on('creds.update', saveCreds);
