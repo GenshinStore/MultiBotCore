@@ -277,7 +277,7 @@ async function startWorkerBot(botId) {
                 console.log(`[Bot ${botId}] ❌ Timeout connect`);
                 try { sock.end(new Error('connect timeout')); } catch { }
                 resolve(false);
-            }, 20000);
+            }, 40000);
 
             sock.ev.on('creds.update', saveCreds);
 
