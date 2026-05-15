@@ -188,7 +188,6 @@ function isDuplicate(link) {
 }
 
 // ================= PROSES & FORWARD LINK =================
-// [FIX] Kirim URL saja (tanpa "\n\nTipe: label") agar tidak memicu WA link preview
 // [FIX] forEach fire-and-forget menggantikan Promise.allSettled agar tidak ada overhead wrapper
 function processExtractedLink(sock, textRaw, label) {
     if (!textRaw) return;
@@ -331,7 +330,7 @@ async function startWorkerBot(botId) {
 
                 const senderRaw = msg.key.participant || msg.key.remoteJid;
                 const senderJid = senderRaw ? senderRaw.split(':')[0] + '@s.whatsapp.net' : '';
-                if (allBotJids.has(senderJid)) return;
+                // if (allBotJids.has(senderJid)) return;
 
                 let m = msg.message;
                 if (!m) return;
