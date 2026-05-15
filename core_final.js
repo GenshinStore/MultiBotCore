@@ -330,7 +330,7 @@ async function startWorkerBot(botId) {
 
                 const senderRaw = msg.key.participant || msg.key.remoteJid;
                 const senderJid = senderRaw ? senderRaw.split(':')[0] + '@s.whatsapp.net' : '';
-                // if (allBotJids.has(senderJid)) return;
+                if (allBotJids.has(senderJid)) return;
 
                 let m = msg.message;
                 if (!m) return;
