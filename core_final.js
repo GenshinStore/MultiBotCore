@@ -426,7 +426,7 @@ async function startAdminBot() {
 
         // ===== !idgrup =====
         if (text === '!idgrup' && from.endsWith('@g.us')) {
-            await adminSock.sendMessage(from, { text: `*ID Grup Ini:*\n${from}` }, { quoted: msg });
+            await adminSock.sendMessage(from, { text: `${from}` }, { quoted: msg });
             return;
         }
 
