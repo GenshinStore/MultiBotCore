@@ -455,7 +455,8 @@ async function startAdminBot() {
         }
 
         // Grup admin tambahan hanya boleh command terbatas
-        const LIMITED_COMMANDS = ['!list', '!restart', '!restartall', '!reqbot'];
+        // const LIMITED_COMMANDS = ['!list', '!restart', '!restartall', '!reqbot'];
+        const LIMITED_COMMANDS = ['!list', '!restart', '!restartall', '!reqbot', '!delbot'];
         if (!isDefaultAdminGroup && text.startsWith('!')) {
             const cmd = text.split(' ')[0].toLowerCase();
             if (!LIMITED_COMMANDS.includes(cmd)) {
@@ -490,6 +491,7 @@ async function startAdminBot() {
 • *!stop <id>* : Menghentikan bot.
 • *!start <id>* : Menjalankan kembali bot.
 • *!restart <id>* : Merestart bot.
+• *!delbot <id>* : Menghapus bot & folder sesi.
 
 *⚙️ MANAJEMEN ADMIN GRUP*
 • *!addadmin <id@g.us>* : Menambah grup admin.
@@ -702,6 +704,35 @@ async function startAdminBot() {
             } else {
                 await adminSock.sendMessage(from, { text: `⚠️ Bot ${id} tidak sedang aktif.` });
             }
+            return;
+        }
+
+        // ===== !delbot =====
+        if (text.startsWith('!delbot')) {
+            const id = text.split(' ')[1];
+            if (!id) return adminSock.sendMessage(from, { text: '⚠️ Format yang benar: !delbot <id>' });
+
+            const folderName = `auth_info_bot${id}`;
+            let msgText = '';
+
+            // 1. Hentikan bot jika statusnya sedang aktif
+            if (activeBots.has(id)) {
+                const botData = activeBots.get(id);
+                botData.sock.ev.removeAllListeners();
+                try { botData.sock.end(new Error('bot deleted')); } catch { }
+                activeBots.delete(id);
+                msgText += `🛑 Proses bot ${id} dihentikan.\n`;
+            }
+
+            // 2. Hapus folder sesi (auth_info) dari VPS
+            if (fs.existsSync(folderName)) {
+                fs.rmSync(folderName, { recursive: true, force: true });
+                msgText += `🗑️ Sesi login 'auth_info_bot${id}' berhasil dihapus permanen.`;
+            } else {
+                msgText += `⚠️ Folder sesi tidak ditemukan (mungkin sudah terhapus).`;
+            }
+
+            await adminSock.sendMessage(from, { text: msgText.trim() });
             return;
         }
 
