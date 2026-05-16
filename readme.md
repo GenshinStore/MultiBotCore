@@ -10,6 +10,6 @@ npm install -g pm2
 apt remove nodejs -y
 apt purge nodejs -y
 
-pm2 start core.js -i max
+pm2 start core.js --name core
 
 
