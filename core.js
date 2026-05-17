@@ -456,12 +456,12 @@ async function startAdminBot() {
 
         // Grup admin tambahan hanya boleh command terbatas
         // const LIMITED_COMMANDS = ['!list', '!restart', '!restartall', '!reqbot'];
-        const LIMITED_COMMANDS = ['!list', '!restart', '!restartall', '!reqbot', '!delbot'];
+        const LIMITED_COMMANDS = ['!list', '!restart', '!restartall', '!reqbot', '!delbot', '!batal'];
         if (!isDefaultAdminGroup && text.startsWith('!')) {
             const cmd = text.split(' ')[0].toLowerCase();
             if (!LIMITED_COMMANDS.includes(cmd)) {
                 return adminSock.sendMessage(from, {
-                    text: `⚠️ Grup Admin Tambahan hanya bisa menggunakan:\n• !list\n• !restart <id>\n• !restartall\n• !reqbot`
+                    text: `⚠️ Perintah yang tersedia:\n• !list\n• !restart <id>\n• !restartall\n• !reqbot <id>\n• !delbot <id> \n•!batal`
                 });
             }
         }
@@ -472,14 +472,14 @@ async function startAdminBot() {
         const isSettingCommand = ['!addadmin', '!deladmin', '!addforward', '!delforward', '!mode'].includes(command);
         if (isSettingCommand && !isDefaultAdminGroup) {
             return adminSock.sendMessage(from, {
-                text: '⚠️ *Akses Ditolak!*\nPerintah ini hanya dapat dijalankan di Grup Admin Utama.'
+                text: '⚠️ *Akses Ditolak!*.'
             });
         }
 
         // ===== !info =====
         if (text === '!info') {
             if (!isDefaultAdminGroup) {
-                return adminSock.sendMessage(from, { text: '⚠️ Menu info hanya tersedia di Grup Admin Utama.' });
+                return adminSock.sendMessage(from, { text: '⚠️ Menu info tidak tersedia.' });
             }
             await adminSock.sendMessage(from, {
                 text: `*🤖 SISTEM MULTI-BOT TERINTEGRASI 🤖*
