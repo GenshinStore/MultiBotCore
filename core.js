@@ -461,7 +461,7 @@ async function startAdminBot() {
             const cmd = text.split(' ')[0].toLowerCase();
             if (!LIMITED_COMMANDS.includes(cmd)) {
                 return adminSock.sendMessage(from, {
-                    text: `⚠️ Perintah yang tersedia:\n• !list\n• !restart <id>\n• !restartall\n• !reqbot <id>\n• !delbot <id> \n•!batal`
+                    text: `⚠️ Perintah yang tersedia:\n• !list\n• !restart <id>\n• !restartall\n• !reqbot <id>\n• !delbot <id>\n•!batal`
                 });
             }
         }
